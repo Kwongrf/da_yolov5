@@ -1,0 +1,1 @@
+python da_train.py --data bdd_day.yaml --cfg yolov5m.yaml --batch-size 64 --device 1 --img-size 256 --epochs 500 --no-da

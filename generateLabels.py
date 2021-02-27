@@ -5,13 +5,18 @@ import shutil
 # labelpath = "/home/krf/datasets/BDD/train/yolo_night/labels/"
 # imagepath = "/home/krf/datasets/BDD/train/yolo_night/images/"
 
+path = "/home/krf/datasets/BDD/train/day/"
+labelpath = "/home/krf/datasets/BDD/train/yolo_day/labels/"
+imagepath = "/home/krf/datasets/BDD/train/yolo_day/images/"
+
+# path = "/home/krf/datasets/BDD/test/day/"
+# labelpath = "/home/krf/datasets/BDD/test/yolo_day/labels/"
+# imagepath = "/home/krf/datasets/BDD/test/yolo_day/images/"
+
 # path = "/home/krf/datasets/BDD/test/night/"
 # labelpath = "/home/krf/datasets/BDD/test/yolo_night/labels/"
 # imagepath = "/home/krf/datasets/BDD/test/yolo_night/images/"
 
-path = "/home/krf/datasets/BDD/test/night/"
-labelpath = "/home/krf/datasets/BDD/test/yolo_night/labels/"
-imagepath = "/home/krf/datasets/BDD/test/yolo_night/images/"
 def move_images():
     flist = os.listdir(path)
     os.makedirs(imagepath,  exist_ok=True)
