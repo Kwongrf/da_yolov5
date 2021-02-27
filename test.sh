@@ -1,0 +1,1 @@
+python test.py --weight 'runs/train/exp8/weights/best.pt' --data bdd_day.yaml --batch-size 64 --device 3 --img-size 256 --task test

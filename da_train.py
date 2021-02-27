@@ -62,7 +62,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
-    train_path = data_dict['train']
+    # train_path = data_dict['train']
+    source_path = data_dict['source']
+    target_path = data_dict['target']
+
     test_path = data_dict['val']
     nc = 1 if opt.single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if opt.single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
@@ -100,7 +103,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
     pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
-    for k, v in model.named_modules():
+    for k,v in model.named_parameters():
         if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
             pg2.append(v.bias)  # biases
         if isinstance(v, nn.BatchNorm2d):
@@ -115,6 +118,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
+    # d_optimizer  = optim.Adam(model.discriminator.parameters(), lr=hyp['lr0'], betas=(hyp['momentum'], 0.999), weight_decay=hyp['weight_decay'])
     logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
     del pg0, pg1, pg2
 
@@ -125,6 +129,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     else:
         lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    # d_scheduler = lr_scheduler.LambdaLR(d_optimizer, lr_lambda=lf)
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # Logging
@@ -182,14 +187,20 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     if cuda and rank != -1:
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank)
 
-    # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
+    #Source domain Trainloader
+    dataloader, dataset = create_dataloader(source_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
+
+    #Target domain Trainloader
+    t_dataloader, t_dataset = create_dataloader(target_path, imgsz, batch_size, gs, opt,
+                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            world_size=opt.world_size, workers=opt.workers,
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
 
     # Process 0
     if rank in [-1, 0]:
@@ -236,6 +247,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
+    
+    disc_loss = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -265,9 +278,21 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        # d_optimizer.zero_grad()
+        n_iters = min(len(dataloader), len(t_dataloader))
+        # Creating iterator from data loader
+        source_iter, target_iter = iter(dataloader), iter(t_dataloader)
+
+        for iter_i in range(n_iters):
+            torch.cuda.empty_cache()
+            # source_data and target_data (16,3,416,416)
+            # source_target and target_target (16,1,5)
+            t_imgs, t_targets, t_paths, _ = target_iter.next()
+            imgs, targets, paths, _ = source_iter.next()
+        # for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            t_imgs = t_imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -287,24 +312,53 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 if sf != 1:
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+                    t_imgs = F.interpolate(t_imgs, size=ns, mode='bilinear', align_corners=False)
+
+            #tensor of shape [batch_size] containing all zeros to indicate that the images are from
+            # source domain 
+            # s_domain = torch.tensor([0] * batch_size, dtype=torch.long).cuda()
+            #tensor of shape [batch_size] containing all ones to indicate that the images are from
+            # target domain 
+            # t_domain = torch.tensor([1] * batch_size, dtype=torch.long).cuda()
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
+                # pred = model(imgs)  # forward
+                s_domain_pred, x, y, dt = model.forward_backbone(imgs)
+                t_domain_pred, _x, _y, _dt = model.forward_backbone(imgs)
+
+                # # Combining the output of discriminator on the source and target domain images
+                # D_output = torch.cat([s_domain_pred, t_domain_pred], dim=0) #(2*bs,2)
+                # # Combining the true label
+                # D_target = torch.cat([s_domain, t_domain], dim=0) #(2*bs)
+
+                # d_loss = nn.CrossEntropyLoss()(D_output, D_target)
+                # disc_loss += d_loss.item()*2*batch_size 
+                s_loss =model.discriminator.loss(s_domain_pred, source=True)
+                t_loss =model.discriminator.loss(t_domain_pred, source=False)
+
+                pred = model.forword_head(x, y, dt)
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
+                
+                loss += s_loss + t_loss
 
             # Backward
             scaler.scale(loss).backward()
-
+            # scaler.scale(d_loss).backward()
             # Optimize
             if ni % accumulate == 0:
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
+
+                # scaler.step(d_optimizer)  # d_optimizer.step
+                # scaler.update()
+                # d_optimizer.zero_grad()
+
                 if ema:
                     ema.update(model)
 
@@ -333,6 +387,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()
+        # d_scheduler.step()
+
 
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
@@ -384,6 +440,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                             'training_results': f.read(),
                             'model': ema.ema,
                             'optimizer': None if final_epoch else optimizer.state_dict(),
+                            # 'd_optimizer': None if final_epoch else d_optimizer.state_dict(),
                             'wandb_id': wandb_run.id if wandb else None}
 
                 # Save last, best and delete

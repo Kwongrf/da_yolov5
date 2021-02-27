@@ -1,0 +1,1 @@
+python train.py --data bdd_day.yaml --cfg yolov5s.yaml --batch-size 1 --device cpu --img-size 256
