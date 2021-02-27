@@ -109,7 +109,7 @@ class Model(nn.Module):
         m = self.head[-1]  # Detect()
         if isinstance(m, Detect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))[0]])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -129,7 +129,8 @@ class Model(nn.Module):
             y = []  # outputs
             for si, fi in zip(s, f):
                 xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-                yi = self.forward_once(xi)[0]  # forward
+                pred, d_pred = self.forward_once(xi) # forward
+                yi = pred[0]
                 # cv2.imwrite(f'img_{si}.jpg', 255 * xi[0].cpu().numpy().transpose((1, 2, 0))[:, :, ::-1])  # save
                 yi[..., :4] /= si  # de-scale
                 if fi == 2:
@@ -137,7 +138,7 @@ class Model(nn.Module):
                 elif fi == 3:
                     yi[..., 0] = img_size[1] - 1 - yi[..., 0]  # de-flip lr
                 y.append(yi)
-            return torch.cat(y, 1), None  # augmented inference, train
+            return torch.cat(y, 1), None, d_pred  # augmented inference, train
         else:
             return self.forward_once(x, profile)  # single-scale inference, train
 
@@ -181,8 +182,8 @@ class Model(nn.Module):
         return x
 
     def forward_once(self, x, profile=False):
-        _, x, y, dt = self.forward_backbone(x, profile) 
-        return self.forword_head(x, y, dt, profile)
+        d_pred, x, y, dt = self.forward_backbone(x, profile) 
+        return self.forword_head(x, y, dt, profile), d_pred
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -355,11 +356,13 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    print(model)
+    # print(model)
     model.train()
 
     # for k,v in [*model.backbone.named_parameters(),*model.head.named_parameters()]:
-    #     print(k)
+    for k,v in model.named_modules():
+        if isinstance(v, nn.BatchNorm2d):
+            print(k)
     # Profile
     # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
     # y = model(img, profile=True)

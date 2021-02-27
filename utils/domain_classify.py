@@ -13,11 +13,12 @@ class DC_img(nn.Module):
                  loss_cls=dict(
                      type='CrossEntropyLoss',
                      use_sigmoid=True,# TODO 
-                     loss_weight=0.1),):
+                     loss_weight=0.1,
+                     reduction='mean')):
         super(DC_img, self).__init__()
         self.da_conv = nn.Conv2d(in_channels, feat_channels, kernel_size=1, stride=1)
         self.da_cls = nn.Conv2d(feat_channels, 1, kernel_size=1, stride=1)
-        self.loss_cls = nn.CrossEntropyLoss()#build_loss(loss_cls)
+        self.loss_cls = nn.BCEWithLogitsLoss(reduction=loss_cls['reduction'])#build_loss(loss_cls)
         self.grl_img = GradientScalarLayer(grl_weight)
         self.sigmoid = nn.Sigmoid()
         self.loss_weight = loss_cls['loss_weight']
@@ -31,13 +32,12 @@ class DC_img(nn.Module):
     def forward(self, x):
         features = self.grl_img(x)
         features = F.relu(self.da_conv(features))
-        dc_scores = self.sigmoid(self.da_cls(features))
+        dc_scores = self.da_cls(features)
         return dc_scores
 
     def loss(self,
              cls_score,
-             source,
-             reduction_override='sum'):
+             source):
         # losses = dict()
         N, C, H, W = cls_score.shape
         domain_label = 0 if source else 1
@@ -47,6 +47,5 @@ class DC_img(nn.Module):
         labels = labels.view(N, -1)
         losses = self.loss_weight * self.loss_cls(
                     cls_score,
-                    labels,
-                    reduction_override=reduction_override)
+                    labels)
         return losses
