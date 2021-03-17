@@ -45,7 +45,6 @@ class FocalLoss(nn.Module):
                                 However, if the field size_average is set to False, the losses are
                                 instead summed for each minibatch.
     """
-
     def __init__(self, class_num, alpha=None, gamma=2, size_average=True,sigmoid=False,reduce=True):
         super(FocalLoss, self).__init__()
         if alpha is None:
