@@ -341,7 +341,11 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 if opt.quad:
                     loss *= 4.
 
+<<<<<<< HEAD
             if not opt.no_da:   
+=======
+            if not opt.no_da :
+>>>>>>> 7a9a5d03e6af97ddbc994b95d553f8152d6d3ec9
                 loss += (s_loss + t_loss) #TODO
 
             # Backward
@@ -523,7 +527,11 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
+<<<<<<< HEAD
     parser.add_argument('--no-da', nargs='?', const=True, default=False, help='using domain classify')
+=======
+    parser.add_argument('--no-da', nargs='?', const=True, default=False, help='using domain classify?')
+>>>>>>> 7a9a5d03e6af97ddbc994b95d553f8152d6d3ec9
     opt = parser.parse_args()
 
     # Set DDP variables
