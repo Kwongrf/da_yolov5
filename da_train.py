@@ -248,7 +248,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     
-    disc_loss = 0
+    s_loss = 0
+    t_loss = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -325,28 +326,22 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             with amp.autocast(enabled=cuda):
                 # pred = model(imgs)  # forward
                 pred, s_domain_pred = model(imgs)
-                t_pred, t_domain_pred = model(t_imgs)
-
-                # # Combining the output of discriminator on the source and target domain images
-                # D_output = torch.cat([s_domain_pred, t_domain_pred], dim=0) #(2*bs,2)
-                # # Combining the true label
-                # D_target = torch.cat([s_domain, t_domain], dim=0) #(2*bs)
-
-                # d_loss = nn.CrossEntropyLoss()(D_output, D_target)
-                # disc_loss += d_loss.item()*2*batch_size
-                if is_parallel(model):
-                    s_loss =model.module.discriminator.loss(s_domain_pred, source=True)
-                    t_loss =model.module.discriminator.loss(t_domain_pred, source=False)
-                else:
-                    s_loss =model.discriminator.loss(s_domain_pred, source=True)
-                    t_loss =model.discriminator.loss(t_domain_pred, source=False)
+                if not opt.no_da: 
+                    t_pred, t_domain_pred = model(t_imgs)
+                    if is_parallel(model):
+                        s_loss =model.module.discriminator.loss(s_domain_pred, source=True)
+                        t_loss =model.module.discriminator.loss(t_domain_pred, source=False)
+                    else:
+                        s_loss =model.discriminator.loss(s_domain_pred, source=True)
+                        t_loss =model.discriminator.loss(t_domain_pred, source=False)
 
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-                
+
+            if not opt.no_da:   
                 loss += (s_loss + t_loss) #TODO
 
             # Backward
@@ -528,6 +523,7 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
+    parser.add_argument('--no-da', nargs='?', const=True, default=False, help='using domain classify')
     opt = parser.parse_args()
 
     # Set DDP variables

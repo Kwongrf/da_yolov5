@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Thread
 
 import numpy as np
+from torch.autograd import Variable
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,16 +23,16 @@ from tqdm import tqdm
 
 import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
-from models.yolo import Model
+from models.yolo_SCL import Model
 from utils.autoanchor import check_anchors
 from utils.datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss, FocalLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
-from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first
+from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
-    train_path = data_dict['train']
+    # train_path = data_dict['train']
+    source_path = data_dict['source']
+    target_path = data_dict['target']
+
     test_path = data_dict['val']
     nc = 1 if opt.single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if opt.single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
@@ -100,7 +104,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
     pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
-    for k, v in model.named_modules():
+    for k,v in model.named_modules():
         if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
             pg2.append(v.bias)  # biases
         if isinstance(v, nn.BatchNorm2d):
@@ -115,6 +119,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
+    # d_optimizer  = optim.Adam(model.discriminator.parameters(), lr=hyp['lr0'], betas=(hyp['momentum'], 0.999), weight_decay=hyp['weight_decay'])
     logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
     del pg0, pg1, pg2
 
@@ -125,6 +130,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     else:
         lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    # d_scheduler = lr_scheduler.LambdaLR(d_optimizer, lr_lambda=lf)
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # Logging
@@ -182,14 +188,20 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     if cuda and rank != -1:
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank)
 
-    # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
+    #Source domain Trainloader
+    dataloader, dataset = create_dataloader(source_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
+
+    #Target domain Trainloader
+    t_dataloader, t_dataset = create_dataloader(target_path, imgsz, batch_size, gs, opt,
+                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            world_size=opt.world_size, workers=opt.workers,
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
 
     # Process 0
     if rank in [-1, 0]:
@@ -205,7 +217,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
             # model._initialize_biases(cf.to(device))
             if plots:
-                plot_labels(labels, save_dir, loggers)
+                # plot_labels(labels, save_dir, loggers) # TODO
                 if tb_writer:
                     tb_writer.add_histogram('classes', c, 0)
 
@@ -236,6 +248,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
+    
+    # s_loss = 0
+    # t_loss = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -260,14 +275,26 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         mloss = torch.zeros(4, device=device)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
-        pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size'))
-        if rank in [-1, 0]:
-            pbar = tqdm(pbar, total=nb)  # progress bar
+        n_iters = min(len(dataloader), len(t_dataloader))
+        pbar = tqdm(range(n_iters))
+        logger.info(('\n' + '%10s' * 14) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size', 'dloss_s1', 'dloss_s2','dloss_s3','dloss_t1','dloss_t2','dloss_t3'))
+        # if rank in [-1, 0]:
+        #     pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        # d_optimizer.zero_grad()
+        # Creating iterator from data loader
+        source_iter, target_iter = iter(dataloader), iter(t_dataloader)
+
+        for i in pbar:
+            torch.cuda.empty_cache()
+            # source_data and target_data (16,3,416,416)
+            # source_target and target_target (16,1,5)
+            t_imgs, t_targets, t_paths, _ = next(target_iter)
+            imgs, targets, paths, _ = next(source_iter)
+        # for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            t_imgs = t_imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -287,24 +314,67 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 if sf != 1:
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+                    t_imgs = F.interpolate(t_imgs, size=ns, mode='bilinear', align_corners=False)
+
+            #tensor of shape [batch_size] containing all zeros to indicate that the images are from
+            # source domain 
+            # s_domain = torch.tensor([0] * batch_size, dtype=torch.long).cuda()
+            #tensor of shape [batch_size] containing all ones to indicate that the images are from
+            # target domain 
+            # t_domain = torch.tensor([1] * batch_size, dtype=torch.long).cuda()
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred, _ = model(imgs)  # forward
+                # pred = model(imgs)  # forward
+                pred, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
+
+
+                
+                
+                    
+                # domain label
+                domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
+                # domain_s_p = Variable(torch.zeros(out_d_inst.size(0)).long().cuda())
+                # k=1th loss
+                dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
+                # k=2nd loss
+                dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
+                # k = 3rd loss 
+                dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
+
+                t_pred, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
+                domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
+                # domain_t_p = Variable(torch.ones(out_d_inst.size(0)).long().cuda())
+                # k=1th loss
+                dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
+                # k=2nd loss
+                dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
+                # k = 3rd loss 
+                dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
+
+                # print(s_out_d_1, s_out_d_2, s_out_d_3)
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
 
+            # if not opt.no_da:   
+            loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) #TODO
+
             # Backward
             scaler.scale(loss).backward()
-
+            # scaler.scale(d_loss).backward()
             # Optimize
             if ni % accumulate == 0:
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
+
+                # scaler.step(d_optimizer)  # d_optimizer.step
+                # scaler.update()
+                # d_optimizer.zero_grad()
+
                 if ema:
                     ema.update(model)
 
@@ -312,8 +382,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                s = ('%10s' * 2 + '%10.4g' * 12) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1], dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3)
                 pbar.set_description(s)
 
                 # Plot
@@ -333,6 +402,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()
+        # d_scheduler.step()
+
 
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
@@ -363,8 +434,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                    'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2','train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3']  # params
+            for x, tag in zip(list(mloss[:-1]) + list(results) + lr + [dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3], tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:
@@ -384,6 +455,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                             'training_results': f.read(),
                             'model': ema.ema,
                             'optimizer': None if final_epoch else optimizer.state_dict(),
+                            # 'd_optimizer': None if final_epoch else d_optimizer.state_dict(),
                             'wandb_id': wandb_run.id if wandb else None}
 
                 # Save last, best and delete
@@ -463,12 +535,13 @@ if __name__ == '__main__':
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--log-imgs', type=int, default=16, help='number of images for W&B logging, max 100')
     parser.add_argument('--log-artifacts', action='store_true', help='log artifacts, i.e. final trained model')
-    parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
+    parser.add_argument('--workers', type=int, default=4, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
+    parser.add_argument('--no-da', nargs='?', const=True, default=False, help='using domain classify')
     opt = parser.parse_args()
 
     # Set DDP variables

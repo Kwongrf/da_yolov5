@@ -1,0 +1,1 @@
+python train_SCL.py --data cityscape2foggy.yaml --cfg yolov5s.yaml --batch-size 32 --device 2,3 --img-size 640 --epochs 300 --name SCL

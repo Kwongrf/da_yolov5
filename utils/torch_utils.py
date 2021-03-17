@@ -128,8 +128,31 @@ def is_parallel(model):
 
 
 def intersect_dicts(da, db, exclude=()):
-    # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
-    return {k: v for k, v in da.items() if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape}
+    _db = {}
+    da_iter = iter(da.items())
+    db_iter = iter(db.items())
+    for i in range(len(da)):
+        ka, va = next(da_iter)
+        kb, vb = next(db_iter)
+        if not any(x in ka for x in exclude) and va.shape == vb.shape:
+            _db[kb] = va
+        else:
+            _db[kb] = vb
+            print(ka,kb,"not match")
+    return _db
+    # for k, v in da.items():
+    #     ka = v
+    #     # print(k)
+    
+    # kb = []
+    # for k, v in db.items():
+    #     _k = k.replace(k.split(".")[0]+'.',"")
+    #     kb[_k] = v
+    #     print(k)
+    return {k: v for k, v in ka.items() if k in kb and not any(x in k for x in exclude) and v.shape == kb[k].shape}
+# def intersect_dicts(da, db, exclude=()):
+#     # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
+#     return {k: v for k, v in da.items() if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape}
 
 
 def initialize_weights(model):

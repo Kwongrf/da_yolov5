@@ -13,7 +13,7 @@ from utils.general import make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 
-from utils.domain_classify import DC_img, netD_img
+from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3
 from utils.grl import grad_reverse, gradient_scalar
 try:
     import thop  # for FLOPS computation
@@ -102,7 +102,7 @@ class Model(nn.Module):
             logger.info('Overriding model.yaml nc=%g with nc=%g' % (self.yaml['nc'], nc))
             self.yaml['nc'] = nc  # override yaml value
         # self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
-        self.backbone, self.head, self.discriminator, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
+        self.backbone, self.head, self.disc1, self.disc2, self.disc3, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
@@ -119,7 +119,6 @@ class Model(nn.Module):
 
         # Init weights, biases
         initialize_weights(self)
-        self.discriminator.init_weights()
         self.info()
         logger.info('')
 
@@ -162,8 +161,34 @@ class Model(nn.Module):
             y.append(x if m.i in self.save else None)  # save output
         # print(x.shape,len(y))
         # return None, x, y, dt
-        return self.discriminator(gradient_scalar(x, -1.0)), x, y, dt 
-    
+        return  x, y, dt 
+
+    def forward_discs(self,x, y):
+        # print(y)
+        f = self.disc1.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x.shape)
+        out_d_1 = self.disc1(gradient_scalar(x, -1.0))  # run
+
+        f = self.disc2.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x.shape)
+        out_d_2 = self.disc2(gradient_scalar(x, -1.0))  # run
+        
+        f = self.disc3.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x)
+        # print(x.shape) 
+        out_d_3 = self.disc3(gradient_scalar(x, -1.0))  # run
+
+        return out_d_1, out_d_2, out_d_3
+
     def forword_head(self, x, y, dt,  profile=False):
         for m in self.head:
             if m.f != -1:  # if not from previous layer
@@ -185,8 +210,9 @@ class Model(nn.Module):
         return x
 
     def forward_once(self, x, profile=False):
-        d_pred, x, y, dt = self.forward_backbone(x, profile) 
-        return self.forword_head(x, y, dt, profile), d_pred
+        x, y, dt = self.forward_backbone(x, profile) 
+        out_d_1, out_d_2, out_d_3 = self.forward_discs(x, y)
+        return self.forword_head(x, y, dt, profile), out_d_1, out_d_2, out_d_3
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -217,11 +243,6 @@ class Model(nn.Module):
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
         for m in self.head.modules():
-            if type(m) is Conv and hasattr(m, 'bn'):
-                m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
-                delattr(m, 'bn')  # remove batchnorm
-                m.forward = m.fuseforward  # update forward
-        for m in self.discriminator.modules():
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
@@ -304,7 +325,14 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             ch = []
         ch.append(c2)
     # disc = None
-    disc = netD_img(ch_in = ch[-1])
+    
+    disc1 = netD1(ch_in = ch[4])
+    disc1.f = 4
+    disc2 = netD2(ch_in = ch[6])
+    disc2.f = 6
+    disc3 = netD3(ch_in = ch[9])
+    disc3.f = 9
+    save.extend([4,6,9])
     # disc = DC_img(ch[-1], grl_weight=1.0) # TODO more config
     # disc = Discriminator(in_ch = ch[-1],slope=0.1)
     head = []   
@@ -352,7 +380,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m_.i == 0:
             ch = []
         ch.append(c2)
-    return nn.Sequential(*backbone), nn.Sequential(*head), disc, sorted(save)
+    return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3, sorted(save)
 
 from utils.torch_utils import intersect_dicts
 if __name__ == '__main__':

@@ -26,3 +26,20 @@ class GradientScalarLayer(torch.nn.Module):
         tmpstr += "weight=" + str(self.weight)
         tmpstr += ")"
         return tmpstr
+
+class GradReverse(torch.autograd.Function):
+    def __init__(self, lambd):
+        self.lambd = lambd
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        #pdb.set_trace()
+        return (grad_output * ctx.lambd) # -1
+
+
+def grad_reverse(x, lambd=1.0):
+    return GradReverse(lambd)(x)
