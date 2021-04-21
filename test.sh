@@ -1,4 +1,4 @@
-python test.py --weight 'runs/train/noda/weights/last.pt' --data bdd_day.yaml --batch-size 64 --device 3 --img-size 256 --task test
+python test.py --weight 'runs/train/scl_v5s300e3/weights/best.pt' --data voc2clipart.yaml --batch-size 16 --device 3 --img-size 300 --task val --name v5s300e_voc2clip
 
 # model           P           R           mAP@.5      mAP@.5:.95
 # no_da_500e      0.825       0.728       0.817       0.501
@@ -11,3 +11,26 @@ python test.py --weight 'runs/train/noda/weights/last.pt' --data bdd_day.yaml --
 # pretrain_disc   0.815        0.77       0.842       0.536 
 # 3_DA            0.836        0.765      0.836       0.532
 
+# VOC2Clipart
+#                Class      Images     Targets           P           R      mAP@.5  mAP@.5:.95: 
+#                  all         500    1.53e+03        0.47       0.394       0.391       0.215
+#            aeroplane         500          41       0.248        0.22       0.222       0.126
+#              bicycle         500          16       0.451       0.812       0.705       0.343
+#                 bird         500         124       0.715       0.169       0.225       0.113
+#                 boat         500          74        0.47       0.297       0.311       0.134
+#               bottle         500          74       0.441       0.432       0.441       0.182
+#                  bus         500           8       0.191         0.5       0.591       0.425
+#                  car         500          84       0.697       0.357       0.408       0.237
+#                  cat         500          23      0.0712      0.0435      0.0205     0.00983
+#                chair         500         163       0.556       0.491       0.506       0.258
+#                  cow         500          21       0.595       0.429       0.474       0.288
+#          diningtable         500          50       0.589        0.38       0.341       0.148
+#                  dog         500          24        0.21       0.292       0.132      0.0835
+#                horse         500          34       0.498       0.324       0.352       0.208
+#            motorbike         500          10       0.513         0.4       0.455       0.319
+#               person         500         566       0.691       0.589       0.623       0.311
+#          pottedplant         500          94       0.487       0.479        0.45       0.249
+#                sheep         500          33       0.367       0.303       0.249       0.111
+#                 sofa         500          21       0.663       0.468       0.478       0.293
+#                train         500          26       0.543       0.423       0.451       0.273
+#            tvmonitor         500          40       0.397       0.475       0.391       0.188

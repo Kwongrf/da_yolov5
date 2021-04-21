@@ -13,7 +13,7 @@ from utils.general import make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 
-from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3
+from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3, netD_inst
 from utils.grl import grad_reverse, gradient_scalar
 try:
     import thop  # for FLOPS computation
@@ -102,7 +102,8 @@ class Model(nn.Module):
             logger.info('Overriding model.yaml nc=%g with nc=%g' % (self.yaml['nc'], nc))
             self.yaml['nc'] = nc  # override yaml value
         # self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
-        self.backbone, self.head, self.disc1, self.disc2, self.disc3, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
+        self.backbone, self.head, self.disc1, self.disc2, self.disc3,\
+            self.disc_inst1, self.disc_inst2, self.disc_inst3, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
@@ -141,7 +142,9 @@ class Model(nn.Module):
                 y.append(yi)
             return torch.cat(y, 1), None, d_pred  # augmented inference, train
         else:
-            return self.forward_once(x, profile)  # single-scale inference, train
+            res = self.forward_once(x, profile) 
+            # print(res)
+            return res  # single-scale inference, train
 
     def forward_backbone(self, x, profile=False):
         y, dt = [], []  # outputs
@@ -207,12 +210,35 @@ class Model(nn.Module):
 
         if profile:
             print('%.1fms total' % sum(dt))
-        return x
+        pred = x
+        f = self.disc_inst1.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x.shape)
+        out_d_inst1 = self.disc_inst1(gradient_scalar(x, -1.0))  # run
+
+        f = self.disc_inst2.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x.shape)
+        out_d_inst2 = self.disc_inst2(gradient_scalar(x, -1.0))  # run
+        
+        f = self.disc_inst3.f
+        # print(f)
+        if f != -1:  # if not from previous layer
+            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
+        # print(x)
+        # print(x.shape) 
+        out_d_inst3 = self.disc_inst3(gradient_scalar(x, -1.0))  # ru
+        return pred, out_d_inst1, out_d_inst2, out_d_inst3
 
     def forward_once(self, x, profile=False):
         x, y, dt = self.forward_backbone(x, profile) 
         out_d_1, out_d_2, out_d_3 = self.forward_discs(x, y)
-        return self.forword_head(x, y, dt, profile), out_d_1, out_d_2, out_d_3
+        preds,out_d_inst1, out_d_inst2, out_d_inst3 = self.forword_head(x, y, dt, profile)
+        return preds, out_d_inst1, out_d_inst2, out_d_inst3 , out_d_1, out_d_2, out_d_3
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -380,12 +406,19 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m_.i == 0:
             ch = []
         ch.append(c2)
-    return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3, sorted(save)
+    disc_inst1 = netD_inst(ch_in = ch[17])
+    disc_inst1.f = 17
+    disc_inst2 = netD_inst(ch_in = ch[20])
+    disc_inst2.f = 20
+    disc_inst3 = netD_inst(ch_in = ch[23])
+    disc_inst3.f = 23
+    save.extend([17,20,23])
+    return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3, disc_inst1, disc_inst2, disc_inst3, sorted(save)
 
 from utils.torch_utils import intersect_dicts
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -398,7 +431,7 @@ if __name__ == '__main__':
     model.train()
 
     # for k,v in [*model.backbone.named_parameters(),*model.head.named_parameters()]:
-    ckpt = torch.load('yolov5s.pt', map_location=device)  # load checkpoint
+    ckpt = torch.load('yolov5m.pt', map_location=device)  # load checkpoint
     # model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc).to(device)  # create
     # exclude = ['anchor'] if opt.cfg or hyp.get('anchors') else []  # exclude keys
     state_dict = ckpt['model'].float().state_dict()  # to FP32

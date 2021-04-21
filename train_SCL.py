@@ -277,7 +277,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             dataloader.sampler.set_epoch(epoch)
         n_iters = min(len(dataloader), len(t_dataloader))
         pbar = tqdm(range(n_iters))
-        logger.info(('\n' + '%10s' * 14) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size', 'dloss_s1', 'dloss_s2','dloss_s3','dloss_t1','dloss_t2','dloss_t3'))
+        logger.info(('\n' + '%10s' * 20) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size', \
+            'dloss_s1', 'dloss_s2','dloss_s3','dloss_t1','dloss_t2','dloss_t3',\
+            'dloss_s_p1', 'dloss_s_p2', 'dloss_s_p3', 'dloss_t_p1', 'dloss_t_p2', 'dloss_t_p3'))
         # if rank in [-1, 0]:
         #     pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
@@ -326,7 +328,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # Forward
             with amp.autocast(enabled=cuda):
                 # pred = model(imgs)  # forward
-                pred, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
+                pred, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
 
 
                 
@@ -334,25 +336,37 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     
                 # domain label
                 domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
-                # domain_s_p = Variable(torch.zeros(out_d_inst.size(0)).long().cuda())
+                domain_s_p1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
+                domain_s_p2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
+                domain_s_p3 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
                 # k=1th loss
                 dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
                 # k=2nd loss
                 dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
                 # k = 3rd loss 
                 dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
+                dloss_s_p1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_p1)
+                dloss_s_p2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_p2)
+                dloss_s_p3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_p3)
 
-                t_pred, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
+                t_pred, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
                 domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
-                # domain_t_p = Variable(torch.ones(out_d_inst.size(0)).long().cuda())
+                domain_t_p1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
+                domain_t_p2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
+                domain_t_p3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
+
                 # k=1th loss
                 dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
                 # k=2nd loss
                 dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
                 # k = 3rd loss 
                 dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
+                dloss_t_p1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_p1)
+                dloss_t_p2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_p2)
+                dloss_t_p3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_p3)
 
                 # print(s_out_d_1, s_out_d_2, s_out_d_3)
+                # print(pred.shape, targets.shape)
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
@@ -360,7 +374,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     loss *= 4.
 
             # if not opt.no_da:   
-            loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) #TODO
+            loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
+                dloss_s_p1 + dloss_s_p2 + dloss_s_p3 + dloss_t_p1 + dloss_t_p2 + dloss_t_p3) #TODO
 
             # Backward
             scaler.scale(loss).backward()
@@ -382,7 +397,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 12) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1], dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3)
+                s = ('%10s' * 2 + '%10.4g' * 18) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1], \
+                    dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3, \
+                    dloss_s_p1 , dloss_s_p2 , dloss_s_p3 , dloss_t_p1 , dloss_t_p2 , dloss_t_p3    )
                 pbar.set_description(s)
 
                 # Plot
@@ -434,8 +451,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2','train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr + [dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3], tags):
+                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2',\
+                        'train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3'\
+                            'train/dloss_s_p1','train/dloss_s_p2','train/dloss_s_p3',\
+                                'train/dloss_t_p1','train/dloss_t_p2','train/dloss_t_p3']  # params
+            for x, tag in zip(list(mloss[:-1]) + list(results) + lr \
+                + [dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3, \
+                    dloss_s_p1, dloss_s_p2, dloss_s_p3, dloss_t_p1, dloss_t_p2, dloss_t_p3], tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:
