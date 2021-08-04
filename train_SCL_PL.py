@@ -28,18 +28,12 @@ from utils.autoanchor import check_anchors
 from utils.datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression
+    check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss, FocalLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 
-import sys
-sys.path.append("/home/krf/models/faster-rcnn.pytorch/lib")
-from model.roi_layers import ROIPool, ROIAlign
-
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 logger = logging.getLogger(__name__)
 
 
@@ -208,7 +202,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-
+    t_dataloader2 = create_dataloader(target_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
+                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
+                                       world_size=opt.world_size, workers=opt.workers,
+                                       pad=0.5, prefix=colorstr('val: '))[0]
     # Process 0
     if rank in [-1, 0]:
         ema.updates = start_epoch * nb // accumulate  # set EMA updates
@@ -257,9 +254,27 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     
     # s_loss = 0
     # t_loss = 0
-    patience = 500
-    no_raise = 0
+    _r, _m, _m = test.test(opt.data,
+                            batch_size=batch_size * 2,
+                            imgsz=imgsz_test,
+                            conf_thres=0.5,
+                            iou_thres=0.5,
+                            model=ema.ema,
+                            single_cls=opt.single_cls,
+                            dataloader=t_dataloader2,
+                            save_dir=data_dict['target'].replace('images', 'labels'),
+                            save_txt=True,
+                            save_hybrid=True,
+                            save_conf=False,
+                            save_json=False,
+                            plots=False)
+
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+        if epoch == 0:
+            t_dataloader, t_dataset = create_dataloader(target_path, imgsz, batch_size, gs, opt,
+                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            world_size=opt.world_size, workers=opt.workers,
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
         model.train()
 
         # Update image weights (optional)
@@ -285,10 +300,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             dataloader.sampler.set_epoch(epoch)
         n_iters = max(len(dataloader), len(t_dataloader))
         pbar = tqdm(range(n_iters))
-        logger.info(('\n' + '%10s' * 23) % ('Epoch', 'box', 'obj', 'cls', 'total', \
-            'sl1', 'sl2','sl3','tl1','tl2','tl3',\
-            'sl_h1', 'sl_h2', 'sl_h3', 'tl_h1', 'tl_h2', 'tl_h3',\
-            'sl_i1', 'sl_i2','sl_i3','tl_i1','tl_i2','tl_i3'))
+        logger.info(('\n' + '%10s' * 19) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total','tloss', \
+            'dloss_s1', 'dloss_s2','dloss_s3','dloss_t1','dloss_t2','dloss_t3',\
+            'dloss_s_p1', 'dloss_s_p2', 'dloss_s_p3', 'dloss_t_p1', 'dloss_t_p2', 'dloss_t_p3'))
         # if rank in [-1, 0]:
         #     pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
@@ -310,6 +324,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             except StopIteration:
                 source_iter = iter(dataloader)
                 imgs, targets, paths, _ = next(source_iter)
+            # t_imgs, t_targets, t_paths, _ = next(target_iter)
+            # imgs, targets, paths, _ = next(source_iter)
         # for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -345,41 +361,32 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # Forward
             with amp.autocast(enabled=cuda):
                 # pred = model(imgs)  # forward
-                pred, s_out_head1, s_out_head2, s_out_head3, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
+                pred, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
+
+
+                
+                
                     
                 # domain label
                 domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
-                domain_s_head1 = Variable(torch.zeros(s_out_head1.size(0)).long().cuda())
-                domain_s_head2 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-                domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-
-                domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())
-
+                domain_s_p1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
+                domain_s_p2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
+                domain_s_p3 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
                 # k=1th loss
                 dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
                 # k=2nd loss
                 dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
                 # k = 3rd loss 
                 dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
-                dloss_s_head1 = 0.5 * FocalLoss(2)(s_out_head1, domain_s_head1)
-                dloss_s_head2 = 0.5 * FocalLoss(2)(s_out_head2, domain_s_head2)
-                dloss_s_head3 = 0.5 * FocalLoss(2)(s_out_head3, domain_s_head3)
+                dloss_s_p1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_p1)
+                dloss_s_p2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_p2)
+                dloss_s_p3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_p3)
 
-                dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
-                dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
-                dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
-
-                t_pred, t_out_head1, t_out_head2, t_out_head3, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
+                t_pred, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
                 domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
-                domain_t_head1 = Variable(torch.ones(t_out_head1.size(0)).long().cuda())
-                domain_t_head2 = Variable(torch.ones(t_out_head2.size(0)).long().cuda())
-                domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
-
-                domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
+                domain_t_p1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
+                domain_t_p2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
+                domain_t_p3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
 
                 # k=1th loss
                 dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
@@ -387,38 +394,28 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
                 # k = 3rd loss 
                 dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
-                dloss_t_head1 = 0.5 * FocalLoss(2)(t_out_head1, domain_t_head1)
-                dloss_t_head2 = 0.5 * FocalLoss(2)(t_out_head2, domain_t_head2)
-                dloss_t_head3 = 0.5 * FocalLoss(2)(t_out_head3, domain_t_head3)
-
-                dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
-                dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
-                dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
+                dloss_t_p1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_p1)
+                dloss_t_p2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_p2)
+                dloss_t_p3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_p3)
 
                 # print(s_out_d_1, s_out_d_2, s_out_d_3)
                 # print(pred.shape, targets.shape)
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                tloss, tloss_items = compute_loss(t_pred, t_targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                    tloss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-            # print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
-            if opt.da == 9:
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                    dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3 +\
-                    dloss_s_inst1 + dloss_s_inst2 + dloss_s_inst3+ dloss_t_inst1 + dloss_t_inst2 + dloss_t_inst3) #TODO
-            elif opt.da == 6:   
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                    dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3) #TODO
-            elif opt.da == 3:
-                loss += (dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-            elif opt.da == 4:
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) 
-            else:
-                pass
+                    tloss *= 4.  # gradient averaged between devices in DDP mode
+            tloss = 0.01 * tloss
+            # if not opt.no_da:   
+            loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
+                dloss_s_p1 + dloss_s_p2 + dloss_s_p3 + dloss_t_p1 + dloss_t_p2 + dloss_t_p3) #TODO
+            if epoch >= 0:
+                loss += tloss
             # Backward
-            with torch.autograd.set_detect_anomaly(True):
-                scaler.scale(loss).backward()
+            scaler.scale(loss).backward()
             # scaler.scale(d_loss).backward()
             # Optimize
             if ni % accumulate == 0:
@@ -437,10 +434,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.3g' * 21) % ('%g/%g' % (epoch, epochs - 1),  *mloss, \
+                s = ('%10s' * 2 + '%10.4g' * 17) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss,tloss , \
                     dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3, \
-                    dloss_s_head1 , dloss_s_head2 , dloss_s_head3 , dloss_t_head1 , dloss_t_head2 , dloss_t_head3,\
-                    dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3    )
+                    dloss_s_p1 , dloss_s_p2 , dloss_s_p3 , dloss_t_p1 , dloss_t_p2 , dloss_t_p3   )
                 pbar.set_description(s)
 
                 # Plot
@@ -482,6 +478,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                                  log_imgs=opt.log_imgs if wandb else 0,
                                                  compute_loss=compute_loss)
 
+
+
+
             # Write
             with open(results_file, 'a') as f:
                 f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
@@ -490,18 +489,15 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
             # Log
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
-                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',\
-                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',\
-                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2', 
-                    'train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3',\
-                    'train/dloss_s_head1','train/dloss_s_head2','train/dloss_s_head3',\
-                    'train/dloss_t_head1','train/dloss_t_head2','train/dloss_t_head3',\
-                    'train/dloss_s_inst1','train/dloss_s_inst2','train/dloss_s_inst3',\
-                    'train/dloss_t_inst1','train/dloss_t_inst2','train/dloss_t_inst3']  # params
+                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
+                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
+                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2',\
+                        'train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3',\
+                            'train/dloss_s_p1','train/dloss_s_p2','train/dloss_s_p3',\
+                                'train/dloss_t_p1','train/dloss_t_p2','train/dloss_t_p3', 'train/tloss']  # params
             for x, tag in zip(list(mloss[:-1]) + list(results) + lr \
                 + [dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3, \
-                dloss_s_head1, dloss_s_head2, dloss_s_head3, dloss_t_head1, dloss_t_head2, dloss_t_head3, \
-                dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3], tags):
+                    dloss_s_p1, dloss_s_p2, dloss_s_p3, dloss_t_p1, dloss_t_p2, dloss_t_p3, tloss], tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:
@@ -511,11 +507,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
             if fi > best_fitness:
                 best_fitness = fi
-                no_raise=0
-            else:
-                no_raise+=1
-                if no_raise >= patience:
-                    break
+
             # Save model
             save = (not opt.nosave) or (final_epoch and not opt.evolve)
             if save:
@@ -566,8 +558,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                           iou_thres=iou,
                                           model=attempt_load(final, device).half(),
                                           single_cls=opt.single_cls,
-                                          dataloader=testloader,
-                                          save_dir=save_dir,
+                                          dataloader=t_dataloader2,
+                                          save_dir=data_dict['target'].replace('images', 'labels'),
                                           save_json=save_json,
                                           plots=False)
 
@@ -605,13 +597,13 @@ if __name__ == '__main__':
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--log-imgs', type=int, default=16, help='number of images for W&B logging, max 100')
     parser.add_argument('--log-artifacts', action='store_true', help='log artifacts, i.e. final trained model')
-    parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
+    parser.add_argument('--workers', type=int, default=2, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
-    parser.add_argument('--da', type=int, default=6)
+    parser.add_argument('--no-da', nargs='?', const=True, default=False, help='using domain classify')
     opt = parser.parse_args()
 
     # Set DDP variables

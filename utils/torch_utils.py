@@ -84,7 +84,7 @@ def time_synchronized():
     return time.time()
 
 
-def profile(x, ops, n=100, device=None):
+def _profile(x, ops, n=100, device=None):
     # profile a pytorch module or list of modules. Example usage:
     #     x = torch.randn(16, 3, 640, 640)  # input
     #     m1 = lambda x: x * torch.sigmoid(x)

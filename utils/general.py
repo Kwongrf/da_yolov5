@@ -487,7 +487,8 @@ def strip_optimizer(f='weights/best.pt', s=''):  # from utils.general import *; 
     for key in 'optimizer', 'training_results', 'wandb_id':
         x[key] = None
     x['epoch'] = -1
-    x['model'].half()  # to FP16
+    x['model'].float()
+    # x['model'].half()  # to FP16
     for p in x['model'].parameters():
         p.requires_grad = False
     torch.save(x, s or f)

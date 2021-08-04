@@ -1,0 +1,1 @@
+python train_SCL_PL.py --hyp hyp.finetune.yaml --data voc2clipart.yaml --cfg yolov5m.yaml --weights "runs/train/v5m100e_6disc_fullvoc7/weights/best.pt" --batch-size 64 --device 0,1 --img-size 320 --epochs 100 --name v5m100e_6disc_fullvoc_pl1time --exist-ok --cache-images --workers 4

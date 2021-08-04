@@ -4,6 +4,9 @@ import sys
 from copy import deepcopy
 
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
+import sys
+sys.path.append("/home/krf/models/faster-rcnn.pytorch/lib")
+from model.roi_layers import ROIPool, ROIAlign
 logger = logging.getLogger(__name__)
 
 from models.common import *
@@ -13,7 +16,7 @@ from utils.general import make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 
-from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3, netD_inst
+from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3, netD_head, netD_inst, flatten
 from utils.grl import grad_reverse, gradient_scalar
 try:
     import thop  # for FLOPS computation
@@ -57,6 +60,7 @@ class Detect(nn.Module):
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
+        self.out = None
 
     def forward(self, x):
         # x = x.copy()  # for profiling
@@ -67,16 +71,43 @@ class Detect(nn.Module):
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
-            if not self.training:  # inference
+            # if not self.training:  # inference
+            try:
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
                 y = x[i].sigmoid()
-                y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
-                y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
-                z.append(y.view(bs, -1, self.no))
+                y_ = y.clone()
+                y_[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
+                y_[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                z.append(y_.view(bs, -1, self.no))
+                
+            except Exception as e:
+                print(e)
+                pass
+        if len(z) == self.nl:
+            return x, z
+        return  x, None
 
-        return x if self.training else (torch.cat(z, 1), x)
+    # def forward(self, x):
+    #     # x = x.copy()  # for profiling
+    #     z = []  # inference output
+    #     self.training |= self.export
+    #     for i in range(self.nl):
+    #         x[i] = self.m[i](x[i])  # conv
+    #         bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+    #         x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+
+            
+    #         if self.grid[i].shape[2:4] != x[i].shape[2:4]:
+    #             self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
+    #         if self.stride is not None:
+    #             y = x[i].sigmoid()
+    #             y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
+    #             y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+    #             z.append(y.view(bs, -1, self.no))
+
+    #     return x if self.stride is None else (torch.cat(z, 1), x)
 
     @staticmethod
     def _make_grid(nx=20, ny=20):
@@ -103,10 +134,11 @@ class Model(nn.Module):
             self.yaml['nc'] = nc  # override yaml value
         # self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.backbone, self.head, self.disc1, self.disc2, self.disc3,\
-            self.disc_inst1, self.disc_inst2, self.disc_inst3, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
+            self.disc_head1, self.disc_head2, self.disc_head3, \
+            self.disc_inst1, self.disc_inst2, self.disc_inst3, self.save  = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
-
+        self.roi_pools = [ROIPool((7, 7), 0.125),ROIPool((7, 7), 0.0625),ROIPool((7, 7), 0.03125)]
         # Build strides, anchors
         m = self.head[-1]  # Detect()
         if isinstance(m, Detect):
@@ -193,6 +225,28 @@ class Model(nn.Module):
         return out_d_1, out_d_2, out_d_3
 
     def forword_head(self, x, y, dt,  profile=False):
+        def cat(tensors, dim=0):
+            """
+            Efficient version of torch.cat that avoids a copy if there is only a single element in a list
+            """
+            assert isinstance(tensors, (list, tuple))
+            if len(tensors) == 1:
+                return tensors[0]
+            return torch.cat(tensors, dim)
+
+        def _convert_to_roi_format(boxes):
+            concat_boxes = cat([b for b in boxes], dim=0)[:,0:4]
+            device, dtype = concat_boxes.device, concat_boxes.dtype
+            ids = cat(
+                [
+                    torch.full((len(b), 1), i, dtype=dtype, device=device)
+                    for i, b in enumerate(boxes)
+                ],
+                dim=0,
+            )
+            rois = torch.cat([ids, concat_boxes], dim=1)
+            return rois
+
         for m in self.head:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -210,35 +264,41 @@ class Model(nn.Module):
 
         if profile:
             print('%.1fms total' % sum(dt))
-        pred = x
-        f = self.disc_inst1.f
-        # print(f)
-        if f != -1:  # if not from previous layer
-            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
-        # print(x.shape)
-        out_d_inst1 = self.disc_inst1(gradient_scalar(x, -1.0))  # run
-
-        f = self.disc_inst2.f
-        # print(f)
-        if f != -1:  # if not from previous layer
-            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
-        # print(x.shape)
-        out_d_inst2 = self.disc_inst2(gradient_scalar(x, -1.0))  # run
         
-        f = self.disc_inst3.f
-        # print(f)
-        if f != -1:  # if not from previous layer
-            x = y[f] if isinstance(f, int) else [x if j == -1 else y[j] for j in f]  # from earlier layers
-        # print(x)
-        # print(x.shape) 
-        out_d_inst3 = self.disc_inst3(gradient_scalar(x, -1.0))  # ru
-        return pred, out_d_inst1, out_d_inst2, out_d_inst3
+        pred = x[0]
+        proposal = x[1]
+        # out_d_inst1, out_d_inst2, out_d_inst3 = None, None, None
+        if proposal is not None:
+            pooled_list = []
+            ftr_list = [4,6,9]
+            for i in range(len(proposal)):
+                # print("proposal.shape", proposal[i].shape)
+                boxes = non_max_suppression(proposal[i], conf_thres=0.25, iou_thres=0.45)
+                
+                rois = _convert_to_roi_format(boxes)
+                # print("rois:", rois.shape)
+                # print("features:", y[ftr_list[i]].shape)
+                # print(rois.device, y[ftr_list[i]].device)
+                pooled_list.append(self.roi_pools[i](y[ftr_list[i]].float(), rois.float()))
+                # print("roi pooled:",pooled_list[i].shape)
+            out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled_list[0]), -1.0))
+            out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled_list[1]), -1.0))
+            out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled_list[2]), -1.0))
+
+    
+        out_d_head1 = self.disc_head1(gradient_scalar(y[self.disc_head1.f], -1.0))  # run
+        out_d_head2 = self.disc_head2(gradient_scalar(y[self.disc_head2.f], -1.0))  # run
+        out_d_head3 = self.disc_head3(gradient_scalar(y[self.disc_head3.f], -1.0))  # run
+        if proposal is not None:
+            return pred, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3
+        else:
+            return pred, out_d_head1, out_d_head2, out_d_head3, None, None, None
 
     def forward_once(self, x, profile=False):
         x, y, dt = self.forward_backbone(x, profile) 
         out_d_1, out_d_2, out_d_3 = self.forward_discs(x, y)
-        preds,out_d_inst1, out_d_inst2, out_d_inst3 = self.forword_head(x, y, dt, profile)
-        return preds, out_d_inst1, out_d_inst2, out_d_inst3 , out_d_1, out_d_2, out_d_3
+        preds, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3 = self.forword_head(x, y, dt, profile)
+        return preds, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3, out_d_1, out_d_2, out_d_3
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -406,14 +466,22 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m_.i == 0:
             ch = []
         ch.append(c2)
-    disc_inst1 = netD_inst(ch_in = ch[17])
-    disc_inst1.f = 17
-    disc_inst2 = netD_inst(ch_in = ch[20])
-    disc_inst2.f = 20
-    disc_inst3 = netD_inst(ch_in = ch[23])
-    disc_inst3.f = 23
+    disc_head1 = netD_head(ch_in = ch[17])
+    disc_head1.f = 17
+    disc_head2 = netD_head(ch_in = ch[20])
+    disc_head2.f = 20
+    disc_head3 = netD_head(ch_in = ch[23])
+    disc_head3.f = 23
     save.extend([17,20,23])
-    return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3, disc_inst1, disc_inst2, disc_inst3, sorted(save)
+
+    disc_inst1 = netD_inst(ch_in = 192*7*7)
+    disc_inst1.f = 4
+    disc_inst2 = netD_inst(ch_in = 384*7*7)
+    disc_inst2.f = 6
+    disc_inst3 = netD_inst(ch_in = 768*7*7)
+    disc_inst3.f = 9
+    return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3,\
+         disc_head1, disc_head2, disc_head3, disc_inst1, disc_inst2, disc_inst3, sorted(save)
 
 from utils.torch_utils import intersect_dicts
 if __name__ == '__main__':
