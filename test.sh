@@ -1,4 +1,4 @@
-python test.py --weight 'runs/train/early_stop/weights/best.pt' --data voc2clipart.yaml --batch-size 2 --device 2 --img-size 320 --task val --name early_stop_map0.5
+python test.py --weight 'runs/train/scl_v5m300e4/weights/best.pt' --data  cityscape2foggy.yaml --batch-size 2 --device 2 --img-size 6400 --task val --name debug
 
 # model           P           R           mAP@.5      mAP@.5:.95
 # no_da_500e      0.825       0.728       0.817       0.501

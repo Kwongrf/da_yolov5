@@ -85,6 +85,8 @@ class Detect(nn.Module):
             except Exception as e:
                 print(e)
                 pass
+        if not self.training:
+            return (torch.cat(z, 1), x)
         if len(z) == self.nl:
             return x, z
         return  x, None
