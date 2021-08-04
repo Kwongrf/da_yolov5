@@ -342,6 +342,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # target domain 
             # t_domain = torch.tensor([1] * batch_size, dtype=torch.long).cuda()
 
+            dloss_s_inst1, dloss_s_inst2, dloss_s_inst3 = 0, 0, 0
+            dloss_t_inst1, dloss_t_inst2, dloss_t_inst3 = 0, 0, 0
             # Forward
             with amp.autocast(enabled=cuda):
                 # pred = model(imgs)  # forward
@@ -353,9 +355,15 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 domain_s_head2 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
                 domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
 
-                domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())
+                
+                if s_out_inst1 is not None and s_out_inst2 is not None and s_out_inst3 is not None:
+                    domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
+                    domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
+                    domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())
+
+                    dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
+                    dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
+                    dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
 
                 # k=1th loss
                 dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
@@ -367,19 +375,21 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 dloss_s_head2 = 0.5 * FocalLoss(2)(s_out_head2, domain_s_head2)
                 dloss_s_head3 = 0.5 * FocalLoss(2)(s_out_head3, domain_s_head3)
 
-                dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
-                dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
-                dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
-
                 t_pred, t_out_head1, t_out_head2, t_out_head3, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
                 domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
                 domain_t_head1 = Variable(torch.ones(t_out_head1.size(0)).long().cuda())
                 domain_t_head2 = Variable(torch.ones(t_out_head2.size(0)).long().cuda())
                 domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
 
-                domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
+                
+                if t_out_inst1 is not None and t_out_inst2 is not None and t_out_inst3 is not None:
+                    domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
+                    domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
+                    domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
+                    
+                    dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
+                    dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
+                    dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
 
                 # k=1th loss
                 dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
@@ -390,10 +400,6 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 dloss_t_head1 = 0.5 * FocalLoss(2)(t_out_head1, domain_t_head1)
                 dloss_t_head2 = 0.5 * FocalLoss(2)(t_out_head2, domain_t_head2)
                 dloss_t_head3 = 0.5 * FocalLoss(2)(t_out_head3, domain_t_head3)
-
-                dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
-                dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
-                dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
 
                 # print(s_out_d_1, s_out_d_2, s_out_d_3)
                 # print(pred.shape, targets.shape)
@@ -437,7 +443,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.3g' * 21) % ('%g/%g' % (epoch, epochs - 1),  *mloss, \
+                s = ('%10s' * 1 + '%10.4g' * 22) % ('%g/%g' % (epoch, epochs - 1),  *mloss, \
                     dloss_s1 , dloss_s2 , dloss_s3 , dloss_t1 , dloss_t2 , dloss_t3, \
                     dloss_s_head1 , dloss_s_head2 , dloss_s_head3 , dloss_t_head1 , dloss_t_head2 , dloss_t_head3,\
                     dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3    )

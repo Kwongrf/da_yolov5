@@ -281,9 +281,14 @@ class Model(nn.Module):
                 # print(rois.device, y[ftr_list[i]].device)
                 pooled_list.append(self.roi_pools[i](y[ftr_list[i]].float(), rois.float()))
                 # print("roi pooled:",pooled_list[i].shape)
-            out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled_list[0]), -1.0))
-            out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled_list[1]), -1.0))
-            out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled_list[2]), -1.0))
+            if pooled_list[0].shape[0] == 0:
+                out_d_inst1 = None
+                out_d_inst2 = None
+                out_d_inst3 = None
+            else:
+                out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled_list[0]), -1.0))
+                out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled_list[1]), -1.0))
+                out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled_list[2]), -1.0))
 
     
         out_d_head1 = self.disc_head1(gradient_scalar(y[self.disc_head1.f], -1.0))  # run
