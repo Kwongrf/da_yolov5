@@ -356,13 +356,14 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
 
                 
-                if s_out_inst1 is not None and s_out_inst2 is not None and s_out_inst3 is not None:
+                if s_out_inst1 is not None:
                     domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                    domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                    domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())
-
                     dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
+                if s_out_inst2 is not None:
+                    domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
                     dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
+                if s_out_inst3 is not None:
+                    domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())                
                     dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
 
                 # k=1th loss
@@ -382,13 +383,14 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
 
                 
-                if t_out_inst1 is not None and t_out_inst2 is not None and t_out_inst3 is not None:
+                if t_out_inst1 is not None:
                     domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                    domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                    domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
-                    
                     dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
+                if t_out_inst2 is not None:
+                    domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
                     dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
+                if t_out_inst3 is not None:
+                    domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
                     dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
 
                 # k=1th loss
