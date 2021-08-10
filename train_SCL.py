@@ -342,104 +342,156 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # target domain 
             # t_domain = torch.tensor([1] * batch_size, dtype=torch.long).cuda()
 
-            dloss_s_inst1, dloss_s_inst2, dloss_s_inst3 = 0, 0, 0
-            dloss_t_inst1, dloss_t_inst2, dloss_t_inst3 = 0, 0, 0
+            dloss_s_inst1, dloss_s_inst2, dloss_s_inst3 = 1e-8, 1e-8, 1e-8
+            dloss_t_inst1, dloss_t_inst2, dloss_t_inst3 = 1e-8, 1e-8, 1e-8
             # Forward
-            with amp.autocast(enabled=cuda):
-                # pred = model(imgs)  # forward
-                pred, s_out_head1, s_out_head2, s_out_head3, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
-                    
-                # domain label
-                domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
-                domain_s_head1 = Variable(torch.zeros(s_out_head1.size(0)).long().cuda())
-                domain_s_head2 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-                domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-
-                
-                if s_out_inst1 is not None:
-                    domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                    dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
-                if s_out_inst2 is not None:
-                    domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                    dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
-                if s_out_inst3 is not None:
-                    domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())                
-                    dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
-
-                # k=1th loss
-                dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
-                # k=2nd loss
-                dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
-                # k = 3rd loss 
-                dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
-                dloss_s_head1 = 0.5 * FocalLoss(2)(s_out_head1, domain_s_head1)
-                dloss_s_head2 = 0.5 * FocalLoss(2)(s_out_head2, domain_s_head2)
-                dloss_s_head3 = 0.5 * FocalLoss(2)(s_out_head3, domain_s_head3)
-
-                t_pred, t_out_head1, t_out_head2, t_out_head3, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
-                domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
-                domain_t_head1 = Variable(torch.ones(t_out_head1.size(0)).long().cuda())
-                domain_t_head2 = Variable(torch.ones(t_out_head2.size(0)).long().cuda())
-                domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
-
-                
-                if t_out_inst1 is not None:
-                    domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                    dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
-                if t_out_inst2 is not None:
-                    domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                    dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
-                if t_out_inst3 is not None:
-                    domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
-                    dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
-
-                # k=1th loss
-                dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
-                # k=2nd loss
-                dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
-                # k = 3rd loss 
-                dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
-                dloss_t_head1 = 0.5 * FocalLoss(2)(t_out_head1, domain_t_head1)
-                dloss_t_head2 = 0.5 * FocalLoss(2)(t_out_head2, domain_t_head2)
-                dloss_t_head3 = 0.5 * FocalLoss(2)(t_out_head3, domain_t_head3)
-
-                # print(s_out_d_1, s_out_d_2, s_out_d_3)
-                # print(pred.shape, targets.shape)
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
-            # print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
-            if opt.da == 9:
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                    dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3 +\
-                    dloss_s_inst1 + dloss_s_inst2 + dloss_s_inst3+ dloss_t_inst1 + dloss_t_inst2 + dloss_t_inst3) #TODO
-            elif opt.da == 6:   
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                    dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3) #TODO
-            elif opt.da == 3:
-                loss += (dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-            elif opt.da == 4:
-                loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) 
-            else:
-                pass
-            # Backward
             with torch.autograd.set_detect_anomaly(True):
-                scaler.scale(loss).backward()
-            # scaler.scale(d_loss).backward()
-            # Optimize
-            if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
+                with amp.autocast(enabled=cuda):
+                    # pred = model(imgs)  # forward
+                    pred, s_out_head1, s_out_head2, s_out_head3, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
+                        
+                    # domain label
+                    domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
+                    domain_s_head1 = Variable(torch.zeros(s_out_head1.size(0)).long().cuda())
+                    domain_s_head2 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
+                    domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
 
-                # scaler.step(d_optimizer)  # d_optimizer.step
-                # scaler.update()
-                # d_optimizer.zero_grad()
+                    
+                    if s_out_inst1 is not None:
+                        domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
+                        dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
+                    if s_out_inst2 is not None:
+                        domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
+                        dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
+                    if s_out_inst3 is not None:
+                        domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())                
+                        dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
 
-                if ema:
-                    ema.update(model)
+                    # k=1th loss
+                    dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
+                    # k=2nd loss
+                    dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
+                    # k = 3rd loss 
+                    dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
+                    dloss_s_head1 = 0.5 * FocalLoss(2)(s_out_head1, domain_s_head1)
+                    dloss_s_head2 = 0.5 * FocalLoss(2)(s_out_head2, domain_s_head2)
+                    dloss_s_head3 = 0.5 * FocalLoss(2)(s_out_head3, domain_s_head3)
+
+                    t_pred, t_out_head1, t_out_head2, t_out_head3, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
+                    domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
+                    domain_t_head1 = Variable(torch.ones(t_out_head1.size(0)).long().cuda())
+                    domain_t_head2 = Variable(torch.ones(t_out_head2.size(0)).long().cuda())
+                    domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
+
+                    
+                    if t_out_inst1 is not None:
+                        domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
+                        dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
+                    if t_out_inst2 is not None:
+                        domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
+                        dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
+                    if t_out_inst3 is not None:
+                        domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
+                        dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
+
+                    # k=1th loss
+                    dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
+                    # k=2nd loss
+                    dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
+                    # k = 3rd loss 
+                    dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
+                    dloss_t_head1 = 0.5 * FocalLoss(2)(t_out_head1, domain_t_head1)
+                    dloss_t_head2 = 0.5 * FocalLoss(2)(t_out_head2, domain_t_head2)
+                    dloss_t_head3 = 0.5 * FocalLoss(2)(t_out_head3, domain_t_head3)
+
+                    # print(s_out_d_1, s_out_d_2, s_out_d_3)
+                    # print(pred.shape, targets.shape)
+                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    if rank != -1:
+                        loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.
+                # print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
+                if opt.da == 9:
+                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
+                        dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
+                    if  dloss_s_inst1 > 1e-7:
+                        loss += dloss_s_inst1
+                    if dloss_s_inst2 > 1e-7:
+                        loss += dloss_s_inst2
+                    if dloss_s_inst3 > 1e-7:
+                        loss += dloss_s_inst3
+                    if  dloss_t_inst1 > 1e-7:
+                        loss += dloss_t_inst1
+                    if dloss_t_inst2 > 1e-7:
+                        loss += dloss_t_inst2
+                    if dloss_t_inst3 > 1e-7:
+                        loss += dloss_t_inst3
+                
+                elif opt.da == 8:
+                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3)
+                    #     dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
+                    if  dloss_s_inst1 > 1e-7:
+                        loss += dloss_s_inst1
+                    if dloss_s_inst2 > 1e-7:
+                        loss += dloss_s_inst2
+                    if dloss_s_inst3 > 1e-7:
+                        loss += dloss_s_inst3
+                    if  dloss_t_inst1 > 1e-7:
+                        loss += dloss_t_inst1
+                    if dloss_t_inst2 > 1e-7:
+                        loss += dloss_t_inst2
+                    if dloss_t_inst3 > 1e-7:
+                        loss += dloss_t_inst3   
+                
+                elif opt.da == 7:
+                    # loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
+                    #     dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
+                    if  dloss_s_inst1 > 1e-7:
+                        loss += dloss_s_inst1
+                    if dloss_s_inst2 > 1e-7:
+                        loss += dloss_s_inst2
+                    if dloss_s_inst3 > 1e-7:
+                        loss += dloss_s_inst3
+                    if  dloss_t_inst1 > 1e-7:
+                        loss += dloss_t_inst1
+                    if dloss_t_inst2 > 1e-7:
+                        loss += dloss_t_inst2
+                    if dloss_t_inst3 > 1e-7:
+                        loss += dloss_t_inst3 
+                        
+                elif opt.da == 6:   
+                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
+                        dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3) #TODO
+                elif opt.da == 3:
+                    loss += (dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
+                elif opt.da == 4:
+                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) 
+                else:
+                    pass
+                # Backward
+                
+                try:
+                    scaler.scale(loss).backward()
+                    # nn.utils.clip_grad_norm_(model.parameters(), max_norm=10, norm_type=2)
+                except Exception as e:
+                    print(e)
+                    print(loss)
+                    print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
+                    continue 
+                # scaler.scale(d_loss).backward()
+                # Optimize
+                if ni % accumulate == 0:
+                    scaler.step(optimizer)  # optimizer.step
+                    scaler.update()
+                    optimizer.zero_grad()
+
+                    # scaler.step(d_optimizer)  # d_optimizer.step
+                    # scaler.update()
+                    # d_optimizer.zero_grad()
+
+                    if ema:
+                        ema.update(model)
 
             # Print
             if rank in [-1, 0]:

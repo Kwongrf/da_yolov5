@@ -60,13 +60,13 @@ class Detect(nn.Module):
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
-        self.out = None
 
     def forward(self, x):
         # x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):
+            # print(self.m[i].weight)
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
@@ -78,6 +78,7 @@ class Detect(nn.Module):
 
                 y = x[i].sigmoid()
                 y_ = y.clone()
+                # y_ = y.detach()
                 y_[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
                 y_[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y_.view(bs, -1, self.no))
@@ -87,6 +88,7 @@ class Detect(nn.Module):
                 pass
         if not self.training:
             return (torch.cat(z, 1), x)
+        # print(len(z) == self.nl)
         if len(z) == self.nl:
             return x, z
         return  x, None
@@ -140,7 +142,12 @@ class Model(nn.Module):
             self.disc_inst1, self.disc_inst2, self.disc_inst3, self.save  = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
-        self.roi_pools = [ROIPool((7, 7), 0.125),ROIPool((7, 7), 0.0625),ROIPool((7, 7), 0.03125)]
+        self.roi_pools = [ROIAlign((7, 7), 0.125, 2),ROIAlign((7, 7), 0.0625, 2),ROIAlign((7, 7), 0.03125, 2)]
+        self.avgpool = nn.AvgPool2d(7, 7)
+        self.res_layer1 = Bottleneck(192, 192)
+        self.res_layer2 = Bottleneck(384, 384)
+        self.res_layer3 = Bottleneck(768, 768)
+
         # Build strides, anchors
         m = self.head[-1]  # Detect()
         if isinstance(m, Detect):
@@ -275,6 +282,7 @@ class Model(nn.Module):
             ftr_list = [4,6,9]
             for i in range(len(proposal)):
                 # print("proposal.shape", proposal[i].shape)
+                # print(proposal[i][..., 4])
                 boxes = non_max_suppression(proposal[i], conf_thres=0.25, iou_thres=0.45)
                 
                 rois = _convert_to_roi_format(boxes)
@@ -283,25 +291,40 @@ class Model(nn.Module):
                 # print(rois.device, y[ftr_list[i]].device)
                 pooled_list.append(self.roi_pools[i](y[ftr_list[i]].float(), rois.float()))
                 # print("roi pooled:",pooled_list[i].shape)
-            if pooled_list[0].shape[0] == 0:
+            if pooled_list[0].shape[0] <= 3:
                 out_d_inst1 = None
             else:
-                out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled_list[0]), -1.0))
+                # print(pooled_list[0].shape)
+                inst_fea1 = self.res_layer1(pooled_list[0])
+                pooled1 = self.avgpool(inst_fea1)
+                # print(pooled1.shape)
+                out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled1), -1.0))
 
-            if pooled_list[1].shape[0] == 0:
+            if pooled_list[1].shape[0] <= 3:
                 out_d_inst2 = None
             else:
-                out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled_list[1]), -1.0))
+                # print(pooled_list[1].shape)
+                inst_fea2 = self.res_layer2(pooled_list[1])
+                pooled2 = self.avgpool(inst_fea2)
+                # print(pooled2.shape)
+                out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled2), -1.0))
 
-            if pooled_list[2].shape[0] == 0:
+            if pooled_list[2].shape[0] <= 3:
                 out_d_inst3= None
             else:
-                out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled_list[2]), -1.0))
+                # print(pooled_list[2].shape)
+                inst_fea3 = self.res_layer3(pooled_list[2])
+                pooled3 = self.avgpool(inst_fea3)
+                # print(pooled3.shape)
+                out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled3), -1.0))
 
     
         out_d_head1 = self.disc_head1(gradient_scalar(y[self.disc_head1.f], -1.0))  # run
         out_d_head2 = self.disc_head2(gradient_scalar(y[self.disc_head2.f], -1.0))  # run
         out_d_head3 = self.disc_head3(gradient_scalar(y[self.disc_head3.f], -1.0))  # run
+        
+        if not self.training:
+            return x, out_d_head1, out_d_head2, out_d_head3, None, None, None
         if proposal is not None:
             return pred, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3
         else:
@@ -336,12 +359,27 @@ class Model(nn.Module):
 
     def fuse(self):  # fuse model Conv2d() + BatchNorm2d() layers
         print('Fusing layers... ')
-        for m in self.backbone.modules():
+        for m in self.backbone.modules() :
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
         for m in self.head.modules():
+            if type(m) is Conv and hasattr(m, 'bn'):
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
+                delattr(m, 'bn')  # remove batchnorm
+                m.forward = m.fuseforward  # update forward
+        for m in self.res_layer1():
+            if type(m) is Conv and hasattr(m, 'bn'):
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
+                delattr(m, 'bn')  # remove batchnorm
+                m.forward = m.fuseforward  # update forward
+        for m in self.res_layer2():
+            if type(m) is Conv and hasattr(m, 'bn'):
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
+                delattr(m, 'bn')  # remove batchnorm
+                m.forward = m.fuseforward  # update forward
+        for m in self.res_layer3():
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
@@ -487,11 +525,11 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     disc_head3.f = 23
     save.extend([17,20,23])
 
-    disc_inst1 = netD_inst(ch_in = 192*7*7)
+    disc_inst1 = netD_inst(ch_in = 192)
     disc_inst1.f = 4
-    disc_inst2 = netD_inst(ch_in = 384*7*7)
+    disc_inst2 = netD_inst(ch_in = 384)
     disc_inst2.f = 6
-    disc_inst3 = netD_inst(ch_in = 768*7*7)
+    disc_inst3 = netD_inst(ch_in = 768)
     disc_inst3.f = 9
     return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3,\
          disc_head1, disc_head2, disc_head3, disc_inst1, disc_inst2, disc_inst3, sorted(save)

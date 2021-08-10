@@ -169,6 +169,39 @@ class netD_head(nn.Module):
       else:
         return x
 
+
+# class netD_inst(nn.Module):
+#     """
+#     Adds a simple Instance-level Domain Classifier head
+#     """
+
+#     def __init__(self, ch_in):
+#         """
+#         Arguments:
+#             in_channels (int): number of channels of the input feature
+#         """
+#         super(netD_inst, self).__init__()
+#         self.fc1_da = nn.Linear(ch_in, 512)
+#         self.fc2_da = nn.Linear(512, 256)
+#         self.fc3_da = nn.Linear(256, 2)
+#         for l in [self.fc1_da, self.fc2_da]:
+#             nn.init.normal_(l.weight, std=0.01)
+#             nn.init.constant_(l.bias, 0)
+#         nn.init.normal_(self.fc3_da.weight, std=0.05)
+#         nn.init.constant_(self.fc3_da.bias, 0)
+
+#     def forward(self, x):
+#         x = F.relu(self.fc1_da(x))
+#         x = F.dropout(x, p=0.5, training=self.training)
+
+#         x = F.relu(self.fc2_da(x))
+#         x = F.dropout(x, p=0.5, training=self.training)
+
+#         x = self.fc3_da(x)
+#         # print(x)
+#         return x
+
+
 class netD_inst(nn.Module):
   def __init__(self, ch_in=2048, context=False):
       super(netD_inst, self).__init__()
