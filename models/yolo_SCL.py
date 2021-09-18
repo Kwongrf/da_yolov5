@@ -16,7 +16,7 @@ from utils.general import make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 
-from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3, netD_head, netD_inst, flatten
+from utils.domain_classify import DC_img, netD_img, netD1, netD2, netD3, netD_head1,netD_head2,netD_head3, netD_inst, flatten
 from utils.grl import grad_reverse, gradient_scalar
 try:
     import thop  # for FLOPS computation
@@ -152,7 +152,7 @@ class Model(nn.Module):
         m = self.head[-1]  # Detect()
         if isinstance(m, Detect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))[0]])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(2, ch, s, s))[0]])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -369,17 +369,17 @@ class Model(nn.Module):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
-        for m in self.res_layer1():
+        for m in self.res_layer1.modules():
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
-        for m in self.res_layer2():
+        for m in self.res_layer2.modules():
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
-        for m in self.res_layer3():
+        for m in self.res_layer3.modules():
             if type(m) is Conv and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
@@ -517,11 +517,11 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m_.i == 0:
             ch = []
         ch.append(c2)
-    disc_head1 = netD_head(ch_in = ch[17])
+    disc_head1 = netD_head1(ch_in = ch[17])
     disc_head1.f = 17
-    disc_head2 = netD_head(ch_in = ch[20])
+    disc_head2 = netD_head2(ch_in = ch[20])
     disc_head2.f = 20
-    disc_head3 = netD_head(ch_in = ch[23])
+    disc_head3 = netD_head3(ch_in = ch[23])
     disc_head3.f = 23
     save.extend([17,20,23])
 

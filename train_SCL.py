@@ -345,6 +345,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             dloss_s_inst1, dloss_s_inst2, dloss_s_inst3 = 1e-8, 1e-8, 1e-8
             dloss_t_inst1, dloss_t_inst2, dloss_t_inst3 = 1e-8, 1e-8, 1e-8
             # Forward
+            head_weight = 0.5
+            inst_weight = 0.5
             with torch.autograd.set_detect_anomaly(True):
                 with amp.autocast(enabled=cuda):
                     # pred = model(imgs)  # forward
@@ -359,13 +361,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     
                     if s_out_inst1 is not None:
                         domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                        dloss_s_inst1 = 0.5 * FocalLoss(2)(s_out_inst1, domain_s_inst1)
+                        dloss_s_inst1 = inst_weight * FocalLoss(2)(s_out_inst1, domain_s_inst1)
                     if s_out_inst2 is not None:
                         domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                        dloss_s_inst2 = 0.5 * FocalLoss(2)(s_out_inst2, domain_s_inst2)
+                        dloss_s_inst2 = inst_weight * FocalLoss(2)(s_out_inst2, domain_s_inst2)
                     if s_out_inst3 is not None:
                         domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())                
-                        dloss_s_inst3 = 0.5 * FocalLoss(2)(s_out_inst3, domain_s_inst3)
+                        dloss_s_inst3 = inst_weight * FocalLoss(2)(s_out_inst3, domain_s_inst3)
 
                     # k=1th loss
                     dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
@@ -373,9 +375,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
                     # k = 3rd loss 
                     dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
-                    dloss_s_head1 = 0.5 * FocalLoss(2)(s_out_head1, domain_s_head1)
-                    dloss_s_head2 = 0.5 * FocalLoss(2)(s_out_head2, domain_s_head2)
-                    dloss_s_head3 = 0.5 * FocalLoss(2)(s_out_head3, domain_s_head3)
+                    dloss_s_head1 = head_weight * FocalLoss(2)(s_out_head1, domain_s_head1)
+                    dloss_s_head2 = head_weight * FocalLoss(2)(s_out_head2, domain_s_head2)
+                    dloss_s_head3 = head_weight * FocalLoss(2)(s_out_head3, domain_s_head3)
 
                     t_pred, t_out_head1, t_out_head2, t_out_head3, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
                     domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
@@ -386,13 +388,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     
                     if t_out_inst1 is not None:
                         domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                        dloss_t_inst1 = 0.5 * FocalLoss(2)(t_out_inst1, domain_t_inst1)
+                        dloss_t_inst1 = inst_weight * FocalLoss(2)(t_out_inst1, domain_t_inst1)
                     if t_out_inst2 is not None:
                         domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                        dloss_t_inst2 = 0.5 * FocalLoss(2)(t_out_inst2, domain_t_inst2)
+                        dloss_t_inst2 = inst_weight * FocalLoss(2)(t_out_inst2, domain_t_inst2)
                     if t_out_inst3 is not None:
                         domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
-                        dloss_t_inst3 = 0.5 * FocalLoss(2)(t_out_inst3, domain_t_inst3)
+                        dloss_t_inst3 = inst_weight * FocalLoss(2)(t_out_inst3, domain_t_inst3)
 
                     # k=1th loss
                     dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
@@ -400,9 +402,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
                     # k = 3rd loss 
                     dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
-                    dloss_t_head1 = 0.5 * FocalLoss(2)(t_out_head1, domain_t_head1)
-                    dloss_t_head2 = 0.5 * FocalLoss(2)(t_out_head2, domain_t_head2)
-                    dloss_t_head3 = 0.5 * FocalLoss(2)(t_out_head3, domain_t_head3)
+                    dloss_t_head1 = head_weight * FocalLoss(2)(t_out_head1, domain_t_head1)
+                    dloss_t_head2 = head_weight * FocalLoss(2)(t_out_head2, domain_t_head2)
+                    dloss_t_head3 = head_weight * FocalLoss(2)(t_out_head3, domain_t_head3)
 
                     # print(s_out_d_1, s_out_d_2, s_out_d_3)
                     # print(pred.shape, targets.shape)
@@ -431,18 +433,19 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 elif opt.da == 8:
                     loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3)
                     #     dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-                    if  dloss_s_inst1 > 1e-7:
-                        loss += dloss_s_inst1
-                    if dloss_s_inst2 > 1e-7:
-                        loss += dloss_s_inst2
-                    if dloss_s_inst3 > 1e-7:
-                        loss += dloss_s_inst3
-                    if  dloss_t_inst1 > 1e-7:
-                        loss += dloss_t_inst1
-                    if dloss_t_inst2 > 1e-7:
-                        loss += dloss_t_inst2
-                    if dloss_t_inst3 > 1e-7:
-                        loss += dloss_t_inst3   
+                    if epoch >= 200:
+                        if  dloss_s_inst1 > 1e-7:
+                            loss += dloss_s_inst1
+                        if dloss_s_inst2 > 1e-7:
+                            loss += dloss_s_inst2
+                        if dloss_s_inst3 > 1e-7:
+                            loss += dloss_s_inst3
+                        if  dloss_t_inst1 > 1e-7:
+                            loss += dloss_t_inst1
+                        if dloss_t_inst2 > 1e-7:
+                            loss += dloss_t_inst2
+                        if dloss_t_inst3 > 1e-7:
+                            loss += dloss_t_inst3   
                 
                 elif opt.da == 7:
                     # loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
@@ -467,6 +470,14 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     loss += (dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
                 elif opt.da == 4:
                     loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) 
+                elif opt.da == 33:
+                    loss += (dloss_s3 +dloss_t3) 
+                elif opt.da == 22:
+                    loss += (dloss_s2 +dloss_t2) 
+                elif opt.da == 11:
+                    loss += (dloss_s1 +dloss_t1) 
+                elif opt.da == 12:
+                    loss += (dloss_s1 + dloss_t1 + dloss_s2 + dloss_t2)
                 else:
                     pass
                 # Backward
