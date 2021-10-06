@@ -72,6 +72,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     # train_path = data_dict['train']
     source_path = data_dict['source']
     target_path = data_dict['target']
+    mix_path = data_dict['mix']
 
     test_path = data_dict['val']
     nc = 1 if opt.single_cls else int(data_dict['nc'])  # number of classes
@@ -208,6 +209,11 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
+                    
+    m_dataloader, m_dataset = create_dataloader(mix_path, imgsz, batch_size, gs, opt,
+                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            world_size=opt.world_size, workers=opt.workers,
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
 
     # Process 0
     if rank in [-1, 0]:
@@ -259,6 +265,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     # t_loss = 0
     patience = 500
     no_raise = 0
+    source_iter, target_iter, mix_iter = iter(dataloader), iter(t_dataloader), iter(m_dataloader)
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -285,36 +292,42 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             dataloader.sampler.set_epoch(epoch)
         n_iters = max(len(dataloader), len(t_dataloader))
         pbar = tqdm(range(n_iters))
-        logger.info(('\n' + '%10s' * 23) % ('Epoch', 'box', 'obj', 'cls', 'total', \
-            'sl1', 'sl2','sl3','tl1','tl2','tl3',\
-            'sl_h1', 'sl_h2', 'sl_h3', 'tl_h1', 'tl_h2', 'tl_h3',\
-            'sl_i1', 'sl_i2','sl_i3','tl_i1','tl_i2','tl_i3'))
+        logger.info(('\n' + '%10s' * 11) % ('Epoch', 'box', 'obj', 'cls', 'total', \
+            'img_l1', 'img_l2','img_l3',\
+            'inst_l1', 'inst_l2','inst_l3'))
         # if rank in [-1, 0]:
         #     pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
         # d_optimizer.zero_grad()
         # Creating iterator from data loader
-        source_iter, target_iter = iter(dataloader), iter(t_dataloader)
+        
 
         for i in pbar:
             torch.cuda.empty_cache()
-            # source_data and target_data (16,3,416,416)
-            # source_target and target_target (16,1,5)
-            try:
-                t_imgs, t_targets, t_paths, _ = next(target_iter)
-            except StopIteration:
-                target_iter = iter(t_dataloader)
-                t_imgs, t_targets, t_paths, _ = next(target_iter)
-            try:
-                imgs, targets, paths, _ = next(source_iter)
-            except StopIteration:
-                source_iter = iter(dataloader)
-                imgs, targets, paths, _ = next(source_iter)
         # for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
-            t_imgs = t_imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            
+            if i % 3 == 0:
+                try:
+                    imgs, targets, paths, _ = next(source_iter)
+                except StopIteration:
+                    source_iter = iter(dataloader)
+                    imgs, targets, paths, _ = next(source_iter) 
+            elif i % 3 == 1:
+                try:
+                    imgs, targets, paths, _  = next(target_iter)
+                except StopIteration:
+                    target_iter = iter(t_dataloader)
+                    imgs, targets, paths, _  = next(target_iter)
+            else:
+                try:
+                    imgs, targets, paths, _ = next(mix_iter)
+                except StopIteration:
+                    mix_iter = iter(m_dataloader)
+                    imgs, targets, paths, _ = next(mix_iter)
 
+            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            # t_imgs = t_imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -335,161 +348,95 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
                     t_imgs = F.interpolate(t_imgs, size=ns, mode='bilinear', align_corners=False)
 
-            #tensor of shape [batch_size] containing all zeros to indicate that the images are from
-            # source domain 
-            # s_domain = torch.tensor([0] * batch_size, dtype=torch.long).cuda()
-            #tensor of shape [batch_size] containing all ones to indicate that the images are from
-            # target domain 
-            # t_domain = torch.tensor([1] * batch_size, dtype=torch.long).cuda()
-
-            dloss_s_inst1, dloss_s_inst2, dloss_s_inst3 = 1e-8, 1e-8, 1e-8
-            dloss_t_inst1, dloss_t_inst2, dloss_t_inst3 = 1e-8, 1e-8, 1e-8
-            # Forward
-            head_weight = 0.5
+            dloss_inst1, dloss_inst2, dloss_inst3, dloss_img1, dloss_img2, dloss_img3 = 1e-8, 1e-8, 1e-8, 1e-8, 1e-8, 1e-8
             inst_weight = 0.5
             with torch.autograd.set_detect_anomaly(True):
                 with amp.autocast(enabled=cuda):
                     # pred = model(imgs)  # forward
-                    pred, s_out_inst1, s_out_inst2, s_out_inst3, s_out_d1, s_out_d2, s_out_d3 = model(imgs)
-                      
-                    # domain label
-                    domain_s2 = domain_s3 = Variable(torch.zeros(s_out_d2.size(0)).long().cuda())
-                    # domain_s_head1 = Variable(torch.zeros(s_out_head1.size(0)).long().cuda())
-                    # domain_s_head2 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-                    # domain_s_head3 = Variable(torch.zeros(s_out_head2.size(0)).long().cuda())
-
+                    pred, out_inst1, out_inst2, out_inst3, out_d1, out_d2, out_d3, num_half_rois = model(imgs)
                     
-                    if s_out_inst1 is not None:
-                        domain_s_inst1 = Variable(torch.zeros(s_out_inst1.size(0)).long().cuda())
-                        dloss_s_inst1 = inst_weight * FocalLoss(2)(s_out_inst1, domain_s_inst1)
-                    if s_out_inst2 is not None:
-                        domain_s_inst2 = Variable(torch.zeros(s_out_inst2.size(0)).long().cuda())
-                        dloss_s_inst2 = inst_weight * FocalLoss(2)(s_out_inst2, domain_s_inst2)
-                    if s_out_inst3 is not None:
-                        domain_s_inst3 = Variable(torch.zeros(s_out_inst3.size(0)).long().cuda())                
-                        dloss_s_inst3 = inst_weight * FocalLoss(2)(s_out_inst3, domain_s_inst3)
+                    if i % 3 == 0:
+                        domain_s2 = domain_s3 = Variable(torch.zeros(out_d2.size(0)).long().cuda())
+                        if out_inst1 is not None:
+                            domain_inst1 = Variable(torch.zeros(out_inst1.size(0)).long().cuda())
+                            dloss_inst1 = inst_weight * FocalLoss(2)(out_inst1, domain_inst1)
+                        if out_inst2 is not None:
+                            domain_inst2 = Variable(torch.zeros(out_inst2.size(0)).long().cuda())
+                            dloss_inst2 = inst_weight * FocalLoss(2)(out_inst2, domain_inst2)
+                        if out_inst3 is not None:
+                            domain_inst3 = Variable(torch.zeros(out_inst3.size(0)).long().cuda())                
+                            dloss_inst3 = inst_weight * FocalLoss(2)(out_inst3, domain_inst3)
+                        
+                        # k=1th loss
+                        dloss_img1 = 0.5 * torch.mean(out_d1 ** 2)
+                        # k=2nd loss
+                        dloss_img2 = 0.5 * nn.CrossEntropyLoss()(out_d2, domain_s2) * 0.15
+                        # k = 3rd loss 
+                        dloss_img3 = 0.5 * FocalLoss(2)(out_d3, domain_s3)
 
-                    # k=1th loss
-                    dloss_s1 = 0.5 * torch.mean(s_out_d1 ** 2)
-                    # k=2nd loss
-                    dloss_s2 = 0.5 * nn.CrossEntropyLoss()(s_out_d2, domain_s2) * 0.15
-                    # k = 3rd loss 
-                    dloss_s3 = 0.5 * FocalLoss(2)(s_out_d3, domain_s3)
-                    # dloss_s_head1 = head_weight * FocalLoss(2)(s_out_head1, domain_s_head1)
-                    # dloss_s_head2 = head_weight * FocalLoss(2)(s_out_head2, domain_s_head2)
-                    # dloss_s_head3 = head_weight * FocalLoss(2)(s_out_head3, domain_s_head3)
-                    
-                    
-                    for _ in range(2):
-                        try:
-                            _t_imgs, t_targets, t_paths, _ = next(target_iter)
-                        except StopIteration:
-                            target_iter = iter(t_dataloader)
-                            _t_imgs, t_targets, t_paths, _ = next(target_iter)
-                        _t_imgs = _t_imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
-                        _t_pred, _t_out_inst1, _t_out_inst2, _t_out_inst3, _t_out_d1, _t_out_d2, _t_out_d3 = model(_t_imgs)
-                        del _t_imgs
-                        del _t_pred
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
 
-                    t_pred, t_out_inst1, t_out_inst2, t_out_inst3, t_out_d1, t_out_d2, t_out_d3 = model(t_imgs)
-                    domain_t2 = domain_t3 = Variable(torch.ones(t_out_d2.size(0)).long().cuda())
-                    # domain_t_head1 = Variable(torch.ones(t_out_head1.size(0)).long().cuda())
-                    # domain_t_head2 = Variable(torch.ones(t_out_head2.size(0)).long().cuda())
-                    # domain_t_head3 = Variable(torch.ones(t_out_head3.size(0)).long().cuda())
+                    elif i % 3 == 1:
+                        domain_t2 = domain_t3 = Variable(torch.ones(out_d2.size(0)).long().cuda())
+                        if out_inst1 is not None:
+                            domain_inst1 = Variable(torch.ones(out_inst1.size(0)).long().cuda())
+                            dloss_inst1 = inst_weight * FocalLoss(2)(out_inst1, domain_inst1)
+                        if out_inst2 is not None:
+                            domain_inst2 = Variable(torch.ones(out_inst2.size(0)).long().cuda())
+                            dloss_inst2 = inst_weight * FocalLoss(2)(out_inst2, domain_inst2)
+                        if out_inst3 is not None:
+                            domain_inst3 = Variable(torch.ones(out_inst3.size(0)).long().cuda())
+                            dloss_inst3 = inst_weight * FocalLoss(2)(out_inst3, domain_inst3)
 
-                    
-                    if t_out_inst1 is not None:
-                        domain_t_inst1 = Variable(torch.ones(t_out_inst1.size(0)).long().cuda())
-                        dloss_t_inst1 = inst_weight * FocalLoss(2)(t_out_inst1, domain_t_inst1)
-                    if t_out_inst2 is not None:
-                        domain_t_inst2 = Variable(torch.ones(t_out_inst2.size(0)).long().cuda())
-                        dloss_t_inst2 = inst_weight * FocalLoss(2)(t_out_inst2, domain_t_inst2)
-                    if t_out_inst3 is not None:
-                        domain_t_inst3 = Variable(torch.ones(t_out_inst3.size(0)).long().cuda())
-                        dloss_t_inst3 = inst_weight * FocalLoss(2)(t_out_inst3, domain_t_inst3)
+                        # k=1th loss
+                        dloss_img1 = 0.5 * torch.mean((1 - out_d1) ** 2)
+                        # k=2nd loss
+                        dloss_img2 = 0.5 * nn.CrossEntropyLoss()(out_d2, domain_t2) * 0.15
+                        # k = 3rd loss 
+                        dloss_img3 = 0.5 * FocalLoss(2)(out_d3, domain_t3)
+                        loss, loss_items = 0, 0
+                    else:
+                        # domain label
+                        # domain_s2 = domain_s3 = Variable(torch.cat((torch.zeros(batch_size//2).long().cuda(), \
+                        #     torch.ones(batch_size//2).long().cuda()), 0))
 
-                    # k=1th loss
-                    dloss_t1 = 0.5 * torch.mean((1 - t_out_d1) ** 2)
-                    # k=2nd loss
-                    dloss_t2 = 0.5 * nn.CrossEntropyLoss()(t_out_d2, domain_t2) * 0.15
-                    # k = 3rd loss 
-                    dloss_t3 = 0.5 * FocalLoss(2)(t_out_d3, domain_t3)
-                    # dloss_t_head1 = head_weight * FocalLoss(2)(t_out_head1, domain_t_head1)
-                    # dloss_t_head2 = head_weight * FocalLoss(2)(t_out_head2, domain_t_head2)
-                    # dloss_t_head3 = head_weight * FocalLoss(2)(t_out_head3, domain_t_head3)
+                        # if out_inst1 is not None:
+                        #     # print(out_inst1.shape, num_half_rois) 
+                        #     domain_inst1 = Variable(torch.cat((torch.zeros(num_half_rois[0]).long().cuda(),\
+                        #         torch.ones(out_inst1.size(0)-num_half_rois[0]).long().cuda()), 0))
+                        #     dloss_inst1 = inst_weight * FocalLoss(2)(out_inst1, domain_inst1)
+                        # if out_inst2 is not None:
+                        #     # print(out_inst2.shape, num_half_rois) 
+                        #     domain_inst2 = Variable(torch.cat((torch.zeros(num_half_rois[1]).long().cuda(),\
+                        #         torch.ones(out_inst2.size(0)-num_half_rois[1]).long().cuda()), 0))
+                        #     dloss_inst2 = inst_weight * FocalLoss(2)(out_inst2, domain_inst2)
+                        # if out_inst3 is not None:
+                        #     # print(out_inst3.shape, num_half_rois) 
+                        #     domain_inst3 = Variable(torch.cat((torch.zeros(num_half_rois[2]).long().cuda(),\
+                        #         torch.ones(out_inst3.size(0)-num_half_rois[2]).long().cuda()), 0))            
+                        #     dloss_inst3 = inst_weight * FocalLoss(2)(out_inst3, domain_inst3)
 
-                    # print(s_out_d_1, s_out_d_2, s_out_d_3)
-                    # print(pred.shape, targets.shape)
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        # # k=1th loss
+                        # dloss_img1 = 0.5*(0.5 * torch.mean(out_d1[:batch_size//2] ** 2) + 0.5 * torch.mean((1 - out_d1[batch_size//2:]) ** 2))
+                        # # k=2nd loss
+                        # dloss_img2 = 0.5 * nn.CrossEntropyLoss()(out_d2, domain_s2) * 0.15
+                        # # k = 3rd loss 
+                        # dloss_img3 = 0.5 * FocalLoss(2)(out_d3, domain_s3)
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        # dloss_img1, dloss_img2, dloss_img3, dloss_inst1, dloss_inst2, dloss_inst3 = 0,0,0,0,0,0
                     if rank != -1:
                         loss *= opt.world_size  # gradient averaged between devices in DDP mode
                     if opt.quad:
-                        loss *= 4.
-                # print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
-                if opt.da == 9:
-                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                        dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-                    if  dloss_s_inst1 > 1e-7:
-                        loss += dloss_s_inst1
-                    if dloss_s_inst2 > 1e-7:
-                        loss += dloss_s_inst2
-                    if dloss_s_inst3 > 1e-7:
-                        loss += dloss_s_inst3
-                    if  dloss_t_inst1 > 1e-7:
-                        loss += dloss_t_inst1
-                    if dloss_t_inst2 > 1e-7:
-                        loss += dloss_t_inst2
-                    if dloss_t_inst3 > 1e-7:
-                        loss += dloss_t_inst3
-                
-                elif opt.da == 8:
-                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3)
-                    #     dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-                    
-                    if  dloss_s_inst1 > 1e-7:
-                        loss += dloss_s_inst1
-                    if dloss_s_inst2 > 1e-7:
-                        loss += dloss_s_inst2
-                    if dloss_s_inst3 > 1e-7:
-                        loss += dloss_s_inst3
-                    if  dloss_t_inst1 > 1e-7:
-                        loss += dloss_t_inst1
-                    if dloss_t_inst2 > 1e-7:
-                        loss += dloss_t_inst2
-                    if dloss_t_inst3 > 1e-7:
-                        loss += dloss_t_inst3   
-                
-                elif opt.da == 7:
-                    # loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                    #     dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-                    if  dloss_s_inst1 > 1e-7:
-                        loss += dloss_s_inst1
-                    if dloss_s_inst2 > 1e-7:
-                        loss += dloss_s_inst2
-                    if dloss_s_inst3 > 1e-7:
-                        loss += dloss_s_inst3
-                    if  dloss_t_inst1 > 1e-7:
-                        loss += dloss_t_inst1
-                    if dloss_t_inst2 > 1e-7:
-                        loss += dloss_t_inst2
-                    if dloss_t_inst3 > 1e-7:
-                        loss += dloss_t_inst3 
-                        
-                elif opt.da == 6:   
-                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3 + \
-                        dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3) #TODO
-                elif opt.da == 3:
-                    loss += (dloss_s_head1 + dloss_s_head2 + dloss_s_head3 + dloss_t_head1 + dloss_t_head2 + dloss_t_head3)
-                elif opt.da == 4:
-                    loss += (dloss_s1 + dloss_s2 + dloss_s3 + dloss_t1 + dloss_t2 + dloss_t3) 
-                elif opt.da == 33:
-                    loss += (dloss_s3 +dloss_t3) 
-                elif opt.da == 22:
-                    loss += (dloss_s2 +dloss_t2) 
-                elif opt.da == 11:
-                    loss += (dloss_s1 +dloss_t1) 
-                elif opt.da == 12:
-                    loss += (dloss_s1 + dloss_t1 + dloss_s2 + dloss_t2)
+                        loss *= 4.  
+                    # from IPython import embed; embed()
+                if opt.da == 8:
+                    loss += (dloss_img1 + dloss_img2 + dloss_img3 )
+                    if  dloss_inst1 > 1e-7:
+                        loss += dloss_inst1
+                    if dloss_inst2 > 1e-7:
+                        loss += dloss_inst2
+                    if dloss_inst3 > 1e-7:
+                        loss += dloss_inst3
                 else:
                     pass
                 # Backward
@@ -499,8 +446,6 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     # nn.utils.clip_grad_norm_(model.parameters(), max_norm=10, norm_type=2)
                 except Exception as e:
                     print(e)
-                    print(loss)
-                    print(dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1 , dloss_t_inst2 , dloss_t_inst3)
                     continue 
                 # scaler.scale(d_loss).backward()
                 # Optimize
@@ -509,10 +454,6 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     scaler.update()
                     optimizer.zero_grad()
 
-                    # scaler.step(d_optimizer)  # d_optimizer.step
-                    # scaler.update()
-                    # d_optimizer.zero_grad()
-
                     if ema:
                         ema.update(model)
 
@@ -520,10 +461,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 1 + '%10.4g' * 16) % ('%g/%g' % (epoch, epochs - 1),  *mloss, \
-                    dloss_s1.item() , dloss_s2.item() , dloss_s3.item() , dloss_t1.item() , dloss_t2.item() , dloss_t3.item(), \
-                    # dloss_s_head1.item() , dloss_s_head2.item() , dloss_s_head3.item() , dloss_t_head1.item() , dloss_t_head2.item() , dloss_t_head3.item(),\
-                    dloss_s_inst1 , dloss_s_inst2, dloss_s_inst3, dloss_t_inst1, dloss_t_inst2, dloss_t_inst3)
+                s = ('%10s' * 1 + '%10.4g' * 10) % ('%g/%g' % (epoch, epochs - 1),  *mloss, \
+                    dloss_img1, dloss_img2, dloss_img3,\
+                    dloss_inst1, dloss_inst2, dloss_inst3)
                 pbar.set_description(s)
 
                 # Plot
@@ -575,16 +515,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',\
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',\
-                    'x/lr0', 'x/lr1', 'x/lr2', 'train/dloss_s1','train/dloss_s2', 
-                    'train/dloss_s3','train/dloss_t1','train/dloss_t2', 'train/dloss_t3',\
-                    # 'train/dloss_s_head1','train/dloss_s_head2','train/dloss_s_head3',\
-                    # 'train/dloss_t_head1','train/dloss_t_head2','train/dloss_t_head3',\
-                    'train/dloss_s_inst1','train/dloss_s_inst2','train/dloss_s_inst3',\
-                    'train/dloss_t_inst1','train/dloss_t_inst2','train/dloss_t_inst3']  # params
+                    'x/lr0', 'x/lr1', 'x/lr2', \
+                    'train/dloss_img1','train/dloss_img2', 'train/dloss_img3',\
+                    'train/dloss_inst1','train/dloss_inst2','train/dloss_inst3',\
+                    ]  # params
             for x, tag in zip(list(mloss[:-1]) + list(results) + lr \
-                + [dloss_s1.item() , dloss_s2.item() , dloss_s3.item() , dloss_t1.item() , dloss_t2.item() , dloss_t3.item(), \
-                # dloss_s_head1.item(), dloss_s_head2.item(), dloss_s_head3.item(), dloss_t_head1.item(), dloss_t_head2.item(), dloss_t_head3.item(), \
-                dloss_s_inst1 , dloss_s_inst2 , dloss_s_inst3 , dloss_t_inst1, dloss_t_inst2, dloss_t_inst3], tags):
+                + [dloss_img1, dloss_img2, dloss_img3, \
+                dloss_inst1 , dloss_inst2 , dloss_inst3], tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:

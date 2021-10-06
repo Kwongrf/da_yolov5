@@ -134,6 +134,8 @@ def intersect_dicts(da, db, exclude=()):
     for i in range(len(da)):
         ka, va = next(da_iter)
         kb, vb = next(db_iter)
+        while kb.split('.')[-1] == 'train_running_mean' or kb.split('.')[-1] == 'train_running_var':
+            kb, vb = next(db_iter)
         if not any(x in ka for x in exclude) and va.shape == vb.shape:
             _db[kb] = va
         else:

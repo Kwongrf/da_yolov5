@@ -1,5 +1,13 @@
-python test.py --weight 'runs/train/inst_align_v5m300e_3da_nopre3/weights/best.pt' --data  cityscape2foggy.yaml --batch-size 2 --device 2 --img-size 640 --task val --name inst_align_v5m300e_3da
-
+python test.py  --weight 'runs/train/v5m300e_8da_iterative/weights/best.pt' \
+                --data  cityscape2foggy.yaml \
+                --batch-size 16 \
+                --device 2 \
+                --img-size 640 \
+                --task val \
+                --name 1stream_iter_0.25_0.45_src_train \
+                --save-txt \
+                --conf-thres 0.25 \
+                --iou-thres 0.45 \
 # model           P           R           mAP@.5      mAP@.5:.95
 # no_da_500e      0.825       0.728       0.817       0.501
 # da_300e         0.79        0.726       0.789       0.478

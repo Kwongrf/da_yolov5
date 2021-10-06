@@ -138,6 +138,7 @@ class Model(nn.Module):
             self.yaml['nc'] = nc  # override yaml value
         # self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.backbone, self.head, self.disc1, self.disc2, self.disc3,\
+            self.disc_head1, self.disc_head2, self.disc_head3, \
             self.disc_inst1, self.disc_inst2, self.disc_inst3, self.save  = parse_model(deepcopy(self.yaml), ch=[ch])  # backbone+head=model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
@@ -229,9 +230,10 @@ class Model(nn.Module):
         # print(x)
         # print(x.shape) 
         out_d_3 = self.disc3(gradient_scalar(x, -1.0))  # run
+
         return out_d_1, out_d_2, out_d_3
 
-    def forword_head(self, x, y, dt, profile=False):
+    def forword_head(self, x, y, dt,  profile=False):
         def cat(tensors, dim=0):
             """
             Efficient version of torch.cat that avoids a copy if there is only a single element in a list
@@ -242,8 +244,6 @@ class Model(nn.Module):
             return torch.cat(tensors, dim)
 
         def _convert_to_roi_format(boxes):
-            bs = len(boxes)
-            half_n_rois = sum([len(b) for b in boxes[:bs//2]])
             concat_boxes = cat([b for b in boxes], dim=0)[:,0:4]
             device, dtype = concat_boxes.device, concat_boxes.dtype
             ids = cat(
@@ -254,7 +254,7 @@ class Model(nn.Module):
                 dim=0,
             )
             rois = torch.cat([ids, concat_boxes], dim=1)
-            return rois, half_n_rois
+            return rois
 
         for m in self.head:
             if m.f != -1:  # if not from previous layer
@@ -278,25 +278,14 @@ class Model(nn.Module):
         proposal = x[1]
         # out_d_inst1, out_d_inst2, out_d_inst3 = None, None, None
         if proposal is not None:
-            def concat2poolfeat(feat, pooled):
-                feat = feat.view(1, -1).repeat(pooled.size(0), 1)
-                pooled = torch.cat((feat, pooled), 1)
-                return pooled
-            def concat_context(context_feat, pooled):
-                for i in range(3):
-                    pooled = concat2poolfeat(context_feat[0], pooled)
-                return pooled
-
             pooled_list = []
             ftr_list = [4,6,9]
-            num_half_rois = [0,0,0]
             for i in range(len(proposal)):
                 # print("proposal.shape", proposal[i].shape)
                 # print(proposal[i][..., 4])
                 boxes = non_max_suppression(proposal[i], conf_thres=0.25, iou_thres=0.45)
                 
-                rois, n_half = _convert_to_roi_format(boxes)
-                num_half_rois[i] = n_half
+                rois = _convert_to_roi_format(boxes)
                 # print("rois:", rois.shape)
                 # print("features:", y[ftr_list[i]].shape)
                 # print(rois.device, y[ftr_list[i]].device)
@@ -308,10 +297,8 @@ class Model(nn.Module):
                 # print(pooled_list[0].shape)
                 inst_fea1 = self.res_layer1(pooled_list[0])
                 pooled1 = self.avgpool(inst_fea1)
-                pooled1 = flatten(pooled1)
-                
                 # print(pooled1.shape)
-                out_d_inst1 = self.disc_inst1(gradient_scalar(pooled1, -1.0))
+                out_d_inst1 = self.disc_inst1(gradient_scalar(flatten(pooled1), -1.0))
 
             if pooled_list[1].shape[0] <= 3:
                 out_d_inst2 = None
@@ -319,10 +306,8 @@ class Model(nn.Module):
                 # print(pooled_list[1].shape)
                 inst_fea2 = self.res_layer2(pooled_list[1])
                 pooled2 = self.avgpool(inst_fea2)
-                pooled2 = flatten(pooled2)
                 # print(pooled2.shape)
-                
-                out_d_inst2 = self.disc_inst2(gradient_scalar(pooled2, -1.0))
+                out_d_inst2 = self.disc_inst2(gradient_scalar(flatten(pooled2), -1.0))
 
             if pooled_list[2].shape[0] <= 3:
                 out_d_inst3= None
@@ -330,23 +315,25 @@ class Model(nn.Module):
                 # print(pooled_list[2].shape)
                 inst_fea3 = self.res_layer3(pooled_list[2])
                 pooled3 = self.avgpool(inst_fea3)
-                pooled3 = flatten(pooled3)
                 # print(pooled3.shape)
-                
-                out_d_inst3 = self.disc_inst3(gradient_scalar(pooled3, -1.0))
+                out_d_inst3 = self.disc_inst3(gradient_scalar(flatten(pooled3), -1.0))
 
+    
+        out_d_head1 = self.disc_head1(gradient_scalar(y[self.disc_head1.f], -1.0))  # run
+        out_d_head2 = self.disc_head2(gradient_scalar(y[self.disc_head2.f], -1.0))  # run
+        out_d_head3 = self.disc_head3(gradient_scalar(y[self.disc_head3.f], -1.0))  # run
         if not self.training:
-            return x, None, None, None, None
+            return x, out_d_head1, out_d_head2, out_d_head3, None, None, None
         if proposal is not None:
-            return pred, out_d_inst1, out_d_inst2, out_d_inst3, num_half_rois
+            return pred, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3
         else:
-            return pred, None, None, None, None
+            return pred, out_d_head1, out_d_head2, out_d_head3, None, None, None
 
     def forward_once(self, x, profile=False):
         x, y, dt = self.forward_backbone(x, profile) 
         out_d_1, out_d_2, out_d_3 = self.forward_discs(x, y)
-        preds, out_d_inst1, out_d_inst2, out_d_inst3, num_half_rois = self.forword_head(x, y, dt,  profile)
-        return preds, out_d_inst1, out_d_inst2, out_d_inst3, out_d_1, out_d_2, out_d_3, num_half_rois
+        preds, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3 = self.forword_head(x, y, dt, profile)
+        return preds, out_d_head1, out_d_head2, out_d_head3, out_d_inst1, out_d_inst2, out_d_inst3, out_d_1, out_d_2, out_d_3
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -529,22 +516,22 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m_.i == 0:
             ch = []
         ch.append(c2)
-    # disc_head1 = netD_head1(ch_in = ch[17])
-    # disc_head1.f = 17
-    # disc_head2 = netD_head2(ch_in = ch[20])
-    # disc_head2.f = 20
-    # disc_head3 = netD_head3(ch_in = ch[23])
-    # disc_head3.f = 23
-    # save.extend([17,20,23])
+    disc_head1 = netD_head1(ch_in = ch[17])
+    disc_head1.f = 17
+    disc_head2 = netD_head2(ch_in = ch[20])
+    disc_head2.f = 20
+    disc_head3 = netD_head3(ch_in = ch[23])
+    disc_head3.f = 23
+    save.extend([17,20,23])
 
-    disc_inst1 = netD_inst(ch_in = 192) # 192 + 384
+    disc_inst1 = netD_inst(ch_in = 192)
     disc_inst1.f = 4
-    disc_inst2 = netD_inst(ch_in = 384) # 384 + 384
+    disc_inst2 = netD_inst(ch_in = 384)
     disc_inst2.f = 6
-    disc_inst3 = netD_inst(ch_in = 768) # 768 + 384
+    disc_inst3 = netD_inst(ch_in = 768)
     disc_inst3.f = 9
     return nn.Sequential(*backbone), nn.Sequential(*head), disc1, disc2, disc3,\
-        disc_inst1, disc_inst2, disc_inst3, sorted(save)
+         disc_head1, disc_head2, disc_head3, disc_inst1, disc_inst2, disc_inst3, sorted(save)
 
 from utils.torch_utils import intersect_dicts
 if __name__ == '__main__':
